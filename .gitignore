@@ -7,12 +7,15 @@ __pycache__/
 # Ignore other Python cache files
 *.pyo
 *.pyd
-
+*.log
+脚本.txt
 # datasets
 datasets/
 save/
+datasets_rlds/
 
 # example/teleop
+test/
 
 # third_party
 third_party/3D-ViTac_Tactile_Hardware

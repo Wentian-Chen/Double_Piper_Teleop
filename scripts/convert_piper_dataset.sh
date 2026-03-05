@@ -42,6 +42,10 @@ mkdir -p "$OUTPUT_DIR"
 # Export env var for builder
 export MAX_EPISODES=$MAX_EPISODES
 
+# Default to CPU-only to avoid CUDA/PTX incompatibilities during conversion.
+# Set PIPER_DISABLE_GPU=0 if you explicitly want to use GPU.
+export PIPER_DISABLE_GPU=${PIPER_DISABLE_GPU:-1}
+
 echo "Starting dataset build process..."
 # We use tfds build command which wraps the python script
 # We pass the config name to the builder

@@ -19,7 +19,7 @@ if __name__ == "__main__":
     os.environ["INFO_LEVEL"] = "DEBUG" # DEBUG , INFO, ERROR
 
     start_episode = 0
-    num_episode = 10
+    num_episode = 50
     avg_collect_time = 0
 
     for episode_id in range(start_episode, start_episode + num_episode):

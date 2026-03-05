@@ -1,3 +1,7 @@
+'''
+pip install tensorflow[and-cuda]>=2.17.0 tensorflow-datasets tensorflow-hub h5py numpy apache-beam mlcroissant
+
+'''
 from typing import Iterator, Tuple, Any
 
 import glob
@@ -41,6 +45,11 @@ class PiperDataset(tfds.core.GeneratorBasedBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if os.environ.get('PIPER_DISABLE_GPU', '0') == '1':
+            try:
+                tf.config.set_visible_devices([], 'GPU')
+            except Exception as e:
+                print(f"Warning: failed to disable GPU: {e}")
         self._embed = hub.load("https://tfhub.dev/google/universal-sentence-encoder-large/5")
 
     def _info(self) -> tfds.core.DatasetInfo:

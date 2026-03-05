@@ -127,7 +127,10 @@ def action_to_move(
     
     # The 8th element (index 7) is gripper state
     gripper = float(np.clip(action[7], 0.0, 1.0))
-
+    if gripper > 0.5:
+        gripper = 0.7
+    else:
+        gripper = 0.4
     return {
         "arm": {
             "left_arm": {
