@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vla-infer"
+version = "0.1.0"
+description = "VLA inference client/server framework for robot deployment"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=10.0",
+  "msgpack>=1.0",
+  "msgpack-numpy>=0.4.8",
+  "pyzmq>=25.0",
+  "draccus>=0.8",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0",
+]
+
+[tool.setuptools]
+packages = [
+  "vla_infer",
+  "vla_infer.src",
+  "vla_infer.src.models",
+  "vla_infer.src.process",
+  "vla_infer.src.robots",
+  "vla_infer.src.zmq",
+  "vla_infer.src.inference",
+]
+
+[tool.setuptools.package-dir]
+"vla_infer" = "."
+"vla_infer.src" = "src"
+"vla_infer.src.models" = "src/models"
+"vla_infer.src.process" = "src/process"
+"vla_infer.src.robots" = "src/robots"
+"vla_infer.src.zmq" = "src/zmq"
+"vla_infer.src.inference" = "src/inference"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -15,8 +15,9 @@ save/
 datasets_rlds/
 
 # example/teleop
-test/
-
+test/*
+tests/*
+vla_infer/tests/
 # third_party
 third_party/3D-ViTac_Tactile_Hardware
 third_party/dr/

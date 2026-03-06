@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import typing as t
-
+import time 
 import numpy as np
-
-from vla_infer.robots.base import BaseRobot
+from .base import BaseRobot
 
 
 class PiperSingleRobot(BaseRobot):
@@ -14,6 +13,18 @@ class PiperSingleRobot(BaseRobot):
     - 复用 `my_robot.agilex_piper_single_base.PiperSingle` 已有能力；
     - 不重写相机驱动和采图逻辑；
     - 仅做观测/动作格式桥接，满足 vla_infer 的统一协议。
+
+    piper.get() 返回数据结构:
+        {
+            'arm': {'left_arm': { 
+                                    'joint': [0.0, 0.85220935, -0.68542569, 0.0, 0.78588684, -0.05256932], 
+                                    'qpos': 0.0,
+                                    'gripper': 0.0
+                                },
+            'image': {
+                        'cam_head': {'color': array, 'depth': array}, 
+                        'cam_wrist': {'color': array, 'depth': array}}
+        }
 
     观测输出格式::
 
@@ -44,7 +55,7 @@ class PiperSingleRobot(BaseRobot):
 
         :param auto_setup: 是否在构造阶段自动执行 :meth:`setup`。
         :param robot_cls: 可注入的机器人实现类，用于测试或自定义替换。
-                          为空时默认使用 ``my_robot.agilex_piper_single_base.PiperSingle``。
+         vla_infer/src/robots/piper_single.py                 为空时默认使用 ``my_robot.agilex_piper_single_base.PiperSingle``。
         """
         if robot_cls is None:
             from my_robot.agilex_piper_single_base import PiperSingle
@@ -55,6 +66,9 @@ class PiperSingleRobot(BaseRobot):
         self._is_setup = False
         if auto_setup:
             self.setup()
+        # initial for warming uo the realsense camera
+        self.get_observation()
+        time.sleep(4)
 
     def setup(self) -> None:
         """初始化机器人连接与采集项。"""
@@ -77,8 +91,25 @@ class PiperSingleRobot(BaseRobot):
 
     @classmethod
     def _extract_arm_state(cls, controller_data: t.Dict[str, t.Any]) -> t.Dict[str, np.ndarray]:
-        """解析左臂状态，并统一类型为 float32 numpy。"""
+        """解析左臂状态，并统一类型为 float32 numpy。
+        {'left_arm': { 
+                        'joint': [0.0, 0.85220935, -0.68542569, 0.0, 0.78588684, -0.05256932], 
+                        'qpos': 0.0,
+                                  'cam_head': {'color': array, 'depth': array}, 
+            'cam_wrist': {'color': array, 'depth': array}  'gripper': 0.0
+                    }
+        }
+
+        返回结构：
+        {
+            "joint": np.ndarray(6,),    # 关节位置
+            "qpos": np.ndarray(6,),     # 关节速度
+            "gripper": np.ndarray(1,),  # 夹爪开合度
+            "state": np.ndarray(7,)     # 关节+夹爪整体状态
+        }
+        """
         left_arm = controller_data.get("left_arm", {})
+        # Keep schema stable even when controller returns scalar or malformed vectors.
         joint = cls._to_fixed_length_vector(left_arm.get("joint", np.zeros(6)), length=6)
         qpos = cls._to_fixed_length_vector(left_arm.get("qpos", np.zeros(6)), length=6)
         gripper_value = np.asarray([left_arm.get("gripper", 0.0)], dtype=np.float32)
@@ -92,7 +123,14 @@ class PiperSingleRobot(BaseRobot):
 
     @staticmethod
     def _extract_images(sensor_data: t.Dict[str, t.Any]) -> t.Dict[str, np.ndarray]:
-        """解析头部与腕部图像（RGB）。"""
+        """解析头部与腕部图像（RGB）。   
+        {
+            'cam_head': {'color': array, 'depth': array}, 
+            'cam_wrist': {'color': array, 'depth': array}
+        }
+
+        RGB格式
+        """
         head = sensor_data.get("cam_head", {}).get("color")
         wrist = sensor_data.get("cam_wrist", {}).get("color")
 
@@ -121,11 +159,6 @@ class PiperSingleRobot(BaseRobot):
         if isinstance(robot_data, dict):
             if "arm" in robot_data and "image" in robot_data:
                 return robot_data.get("arm", {}), robot_data.get("image", {})
-            if "left_arm" in robot_data and "cam_head" in robot_data:
-                return {"left_arm": robot_data.get("left_arm", {})}, {
-                    "cam_head": robot_data.get("cam_head", {}),
-                    "cam_wrist": robot_data.get("cam_wrist", {}),
-                }
 
         raise RuntimeError(
             "Unexpected PiperSingle.get() return format. expected [controller_data, sensor_data] "
@@ -140,6 +173,15 @@ class PiperSingleRobot(BaseRobot):
         - 若下游算法需要 OpenCV 默认格式，请自行转换为 BGR。
 
         :return: 统一观测字典（图像 + 本体状态）。
+
+        {
+            "cam_head": np.ndarray(H, W, 3),
+            "cam_wrist": np.ndarray(H, W, 3),
+            "state": np.ndarray(7,),      # [joint(6), gripper(1)]
+            "joint": np.ndarray(6,),
+            "qpos": np.ndarray(6,),
+            "gripper": np.ndarray(1,)
+        }       
         """
         robot_data = self._robot.get()
         controller_data, sensor_data = self._split_robot_data(robot_data)

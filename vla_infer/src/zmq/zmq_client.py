@@ -1,7 +1,7 @@
 import zmq
 import logging
 import typing
-from vla_infer.protocol import VLAProtocol
+from .protocol import VLAProtocol
 
 class VLAClient:
     def __init__(self, server_ip: str="127.0.0.1", port: int = 5555, timeout_ms: int = 2000):
