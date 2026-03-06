@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import typing as t
-import importlib
 
 import numpy as np
 
 from .base import BaseVLAModel
 
 
-class SmolVLAModel(BaseVLAModel):
-    """SmolVLA server-side wrapper with in-file loading/inference logic.
+@dataclass
+class _SmolVLAInputMapping:
+    head_image_key: str
+    wrist_image_key: t.Optional[str]
+    state_key: t.Optional[str]
 
-    This implementation extracts model loading and action inference flow from
-    `policy/smolvla/inference_model.py` and keeps it local to vla_infer, so we
-    do not import that policy script directly.
+
+class SmolVLAModel(BaseVLAModel):
+    """SmolVLA server-side wrapper using official LeRobot inference pipeline.
 
     Request payload preferred format::
 
@@ -33,230 +36,199 @@ class SmolVLAModel(BaseVLAModel):
         dataset_root: t.Optional[str] = None,
         action_chunk_size: t.Optional[int] = None,
     ) -> None:
+        """Initialize SmolVLA wrapper.
+
+        Notes:
+        - This class assumes user already added the `lerobot` project root to
+          `sys.path`, so standard imports like `import lerobot` work.
+        - `dataset_repo_id`/`dataset_root` are kept for compatibility but are
+          not required for inference with pretrained processors.
+        """
         self.dataset_repo_id = dataset_repo_id
         self.dataset_root = dataset_root
         self.action_chunk_size = action_chunk_size
 
-        self._instruction = "pick up object"
-        self._use_lerobot = False
+        self._default_instruction = ""
 
+        self._input_mapping: t.Optional[_SmolVLAInputMapping] = None
         self._policy: t.Any = None
         self._preprocessor: t.Any = None
         self._postprocessor: t.Any = None
-
-        self._processor: t.Any = None
-        self._vla: t.Any = None
 
         self._torch: t.Any = None
         super().__init__(model_path=model_path, device=device)
 
     @staticmethod
-    def _pick_first_image(
-        observation: t.Dict[str, t.Any],
-        candidate_keys: t.Sequence[str],
-        logical_name: str,
-    ) -> np.ndarray:
-        for key in candidate_keys:
-            if key in observation:
-                image = observation[key]
-                if not isinstance(image, np.ndarray):
-                    raise ValueError(f"{logical_name} image must be numpy.ndarray, got {type(image)}")
-                if image.ndim != 3 or image.shape[-1] != 3:
-                    raise ValueError(f"{logical_name} image must be HxWx3 RGB array, got shape={image.shape}")
-                return image
-        raise KeyError(f"Missing {logical_name} image. tried keys={list(candidate_keys)}")
+    def _validate_rgb_image(name: str, value: t.Any) -> np.ndarray:
+        if not isinstance(value, np.ndarray):
+            raise ValueError(f"{name} must be numpy.ndarray, got {type(value)}")
+        if value.ndim != 3 or value.shape[-1] != 3:
+            raise ValueError(f"{name} must be HxWx3 RGB array, got shape={value.shape}")
+        if value.strides is not None and any(step < 0 for step in value.strides):
+            return value.copy()
+        return value
 
     @staticmethod
-    def _pick_state(observation: t.Dict[str, t.Any]) -> t.Optional[np.ndarray]:
-        for key in ("state", "robot_state", "proprio"):
-            if key in observation and observation[key] is not None:
-                return np.asarray(observation[key], dtype=np.float32).reshape(-1)
-        return None
+    def _validate_state(value: t.Any) -> np.ndarray:
+        state = np.asarray(value, dtype=np.float32).reshape(-1)
+        if state.shape[0] != 7:
+            raise ValueError(f"state must be shape (7,), got {state.shape}")
+        return state
 
     @staticmethod
-    def _normalize_action(action: t.Any) -> np.ndarray:
+    def _to_action_array(action: t.Any) -> np.ndarray:
         action_np = np.asarray(action, dtype=np.float32)
+        if action_np.ndim == 3 and action_np.shape[0] == 1:
+            action_np = action_np[0]
         if action_np.ndim == 1:
-            action_np = np.expand_dims(action_np, axis=0)
+            action_np = action_np[None, :]
+        if action_np.ndim != 2:
+            raise ValueError(f"Expected action with shape (T, D) or (D,), got {action_np.shape}")
         return action_np
 
     @staticmethod
-    def _ensure_no_negative_strides(array: np.ndarray) -> np.ndarray:
-        if array.strides is not None and any(step < 0 for step in array.strides):
-            return array.copy()
-        return array
+    def _candidate_input_keys(input_features: t.Dict[str, t.Any]) -> t.Tuple[t.List[str], t.List[str]]:
+        image_keys = [k for k in input_features.keys() if k.startswith("observation.images.")]
+        state_keys = [k for k in input_features.keys() if k.endswith(".state")]
+        return image_keys, state_keys
+
+    @staticmethod
+    def _resolve_input_mapping(input_features: t.Dict[str, t.Any]) -> _SmolVLAInputMapping:
+        image_keys, state_keys = SmolVLAModel._candidate_input_keys(input_features)
+        if not image_keys:
+            raise RuntimeError("SmolVLA config has no image input features under `observation.images.*`")
+
+        head_key = "observation.images.image" if "observation.images.image" in image_keys else image_keys[0]
+
+        wrist_key: t.Optional[str] = None
+        for key in image_keys:
+            if key == head_key:
+                continue
+            if "wrist" in key:
+                wrist_key = key
+                break
+        if wrist_key is None:
+            for key in image_keys:
+                if key != head_key:
+                    wrist_key = key
+                    break
+
+        state_key: t.Optional[str] = "observation.state" if "observation.state" in state_keys else None
+        if state_key is None and state_keys:
+            state_key = state_keys[0]
+
+        return _SmolVLAInputMapping(
+            head_image_key=head_key,
+            wrist_image_key=wrist_key,
+            state_key=state_key,
+        )
+
+    def _build_policy_input(
+        self,
+        cmd: str,
+        image: np.ndarray,
+        wrist_image: np.ndarray,
+        state: np.ndarray,
+    ) -> t.Dict[str, t.Any]:
+        if self._input_mapping is None:
+            raise RuntimeError("Input mapping is not initialized. Call load_model first.")
+
+        payload: t.Dict[str, t.Any] = {
+            self._input_mapping.head_image_key: image,
+            "task": cmd,
+        }
+
+        if self._input_mapping.wrist_image_key is not None:
+            payload[self._input_mapping.wrist_image_key] = wrist_image
+
+        if self._input_mapping.state_key is not None:
+            payload[self._input_mapping.state_key] = state
+
+        return payload
+
+    def _ensure_loaded(self) -> None:
+        if self._policy is None or self._preprocessor is None or self._postprocessor is None:
+            raise RuntimeError("SmolVLAModel is not initialized. Call load_model first.")
 
     def load_model(self) -> None:
-        """Load SmolVLA model.
-
-        Priority:
-        - LeRobot pipeline when available and dataset_repo_id is provided.
-        - Fallback to raw Transformers pipeline.
-        """
-        import torch
+        """Load SmolVLA policy and processors from LeRobot pretrained artifacts."""
+        try:
+            import torch
+            from lerobot.policies.factory import make_pre_post_processors
+            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+        except Exception as exc:
+            raise ImportError(
+                "Failed to import LeRobot SmolVLA modules. "
+                "Please add lerobot repo root to sys.path before creating SmolVLAModel."
+            ) from exc
 
         self._torch = torch
-        runtime_device = self.device if self.device else ("cuda" if torch.cuda.is_available() else "cpu")
-        self.device = runtime_device
+        if not self.device:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        lerobot_available = False
-        if self.dataset_repo_id is not None:
-            try:
-                pretrain_cfg_module = importlib.import_module("lerobot.configs.policies")
-                dataset_module = importlib.import_module("lerobot.datasets.lerobot_dataset")
-                policy_factory_module = importlib.import_module("lerobot.policies.factory")
+        policy = SmolVLAPolicy.from_pretrained(self.model_path)
+        if self.action_chunk_size is not None:
+            policy.config.n_action_steps = int(self.action_chunk_size)
+            policy.reset()
 
-                PreTrainedConfig = getattr(pretrain_cfg_module, "PreTrainedConfig")
-                LeRobotDataset = getattr(dataset_module, "LeRobotDataset")
-                make_policy = getattr(policy_factory_module, "make_policy")
-                make_pre_post_processors = getattr(policy_factory_module, "make_pre_post_processors")
+        policy = policy.to(self.device)
+        policy.eval()
 
-                cfg = PreTrainedConfig.from_pretrained(self.model_path)
-                if self.action_chunk_size is not None:
-                    cfg.n_action_steps = self.action_chunk_size
+        # Keep pre/post processors aligned with the pretrained model card config.
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy_cfg=policy.config,
+            pretrained_path=self.model_path,
+        )
 
-                dataset = LeRobotDataset(repo_id=self.dataset_repo_id, root=self.dataset_root)
-                ds_meta = dataset.meta
+        self._policy = policy
+        self._preprocessor = preprocessor
+        self._postprocessor = postprocessor
+        self._input_mapping = self._resolve_input_mapping(policy.config.input_features)
 
-                policy = make_policy(cfg=cfg, ds_meta=ds_meta)
-                policy = policy.from_pretrained(self.model_path, config=cfg)
+    def predict_action_chunk(self, observation: t.Dict[str, t.Any]) -> np.ndarray:
+        """Predict an action chunk with shape (T, D)."""
+        self._ensure_loaded()
 
-                if self.action_chunk_size is not None:
-                    policy.config.n_action_steps = self.action_chunk_size
-                    if hasattr(policy, "n_action_steps"):
-                        policy.n_action_steps = self.action_chunk_size
+        cmd = str(observation.get("cmd", self._default_instruction) or self._default_instruction)
+        image = self._validate_rgb_image("image", observation.get("image"))
+        wrist_image = self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        state = self._validate_state(observation.get("state"))
 
-                policy.to(self.device)
-                policy.eval()
-
-                preprocessor, postprocessor = make_pre_post_processors(
-                    policy_cfg=cfg,
-                    pretrained_path=self.model_path,
-                )
-
-                self._policy = policy
-                self._preprocessor = preprocessor
-                self._postprocessor = postprocessor
-                lerobot_available = True
-            except Exception:
-                lerobot_available = False
-
-        self._use_lerobot = lerobot_available
-        if self._use_lerobot:
-            return
-
-        from transformers import AutoModelForVision2Seq, AutoProcessor
-
-        self._processor = AutoProcessor.from_pretrained(self.model_path, trust_remote_code=True)
-        self._vla = AutoModelForVision2Seq.from_pretrained(
-            self.model_path,
-            attn_implementation="flash_attention_2",
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-        ).to(self.device)
-
-    def _build_lerobot_batch(
-        self,
-        image: np.ndarray,
-        wrist_image: np.ndarray,
-        state: t.Optional[np.ndarray],
-        instruction: str,
-    ) -> t.Dict[str, t.Any]:
-        batch: t.Dict[str, t.Any] = {
-            "observation.images.image": image,
-            "observation.images.wrist_image": wrist_image,
-        }
-        if state is not None:
-            batch["observation.state"] = state
-
-        prepared: t.Dict[str, t.Any] = {}
-        for key, value in batch.items():
-            if isinstance(value, np.ndarray):
-                value = self._ensure_no_negative_strides(value)
-                tensor = self._torch.from_numpy(value).to(self.device).float()
-
-                if "image" in key and value.dtype == np.uint8:
-                    tensor = tensor / 255.0
-
-                if tensor.ndim > 0:
-                    tensor = tensor.unsqueeze(0)
-
-                if "image" in key and tensor.shape[-1] == 3:
-                    tensor = tensor.permute(0, 3, 1, 2)
-
-                prepared[key] = tensor
-            else:
-                prepared[key] = value
-
-        prepared["task"] = [instruction]
-        return prepared
-
-    def _predict_lerobot_chunk(
-        self,
-        image: np.ndarray,
-        wrist_image: np.ndarray,
-        state: t.Optional[np.ndarray],
-        instruction: str,
-    ) -> np.ndarray:
-        if self._policy is None or self._preprocessor is None or self._postprocessor is None:
-            raise RuntimeError("SmolVLA LeRobot components are not initialized")
-
-        batch = self._build_lerobot_batch(image, wrist_image, state, instruction)
-
+        payload = self._build_policy_input(cmd=cmd, image=image, wrist_image=wrist_image, state=state)
         with self._torch.no_grad():
-            batch = self._preprocessor(batch)
-            if hasattr(self._policy, "predict_action_chunk"):
-                action = self._policy.predict_action_chunk(batch)
-            else:
-                action = self._policy.select_action(batch)
+            model_input = self._preprocessor(payload)
+            action_chunk = self._policy.predict_action_chunk(model_input)
+            action_chunk = self._postprocessor(action_chunk)
+
+        return self._to_action_array(action_chunk)
+
+    def predict_action(self, observation: t.Dict[str, t.Any]) -> np.ndarray:
+        """Predict a single action, returned as shape (1, D)."""
+        self._ensure_loaded()
+
+        cmd = str(observation.get("cmd", self._default_instruction) or self._default_instruction)
+        image = self._validate_rgb_image("image", observation.get("image"))
+        wrist_image = self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        state = self._validate_state(observation.get("state"))
+
+        payload = self._build_policy_input(cmd=cmd, image=image, wrist_image=wrist_image, state=state)
+        with self._torch.no_grad():
+            model_input = self._preprocessor(payload)
+            action = self._policy.select_action(model_input)
             action = self._postprocessor(action)
 
-        return np.asarray(action.squeeze(0).cpu().numpy(), dtype=np.float32)
-
-    def _predict_transformers_action(
-        self,
-        image: np.ndarray,
-        wrist_image: np.ndarray,
-        instruction: str,
-    ) -> np.ndarray:
-        if self._processor is None or self._vla is None:
-            raise RuntimeError("SmolVLA transformers components are not initialized")
-
-        from PIL import Image
-
-        image_head = Image.fromarray(image)
-        image_wrist = Image.fromarray(wrist_image)
-        combined = Image.new("RGB", (image_head.width + image_wrist.width, image_head.height))
-        combined.paste(image_head, (0, 0))
-        combined.paste(image_wrist, (image_head.width, 0))
-
-        inputs = self._processor(text=instruction, images=combined, return_tensors="pt").to(
-            self.device,
-            self._torch.bfloat16,
-        )
-        action = self._vla.predict_action(**inputs, unnorm_key="bridge_orig", do_sample=False)
-        return np.asarray(action, dtype=np.float32)
+        return self._to_action_array(action)
 
     def predict(self, observation: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
-        """Run SmolVLA inference and return action chunk in standard format."""
-        instruction = str(observation.get("cmd", self._instruction) or self._instruction)
-        self._instruction = instruction
+        """Run SmolVLA inference.
 
-        image = self._pick_first_image(
-            observation,
-            candidate_keys=("image", "cam_head", "image_head", "front_image", "full_image"),
-            logical_name="head",
-        )
-        wrist_image = self._pick_first_image(
-            observation,
-            candidate_keys=("wrist_image", "image_wrist", "cam_wrist"),
-            logical_name="wrist",
-        )
-        state = self._pick_state(observation)
-
-        if self._use_lerobot:
-            action = self._predict_lerobot_chunk(image, wrist_image, state, instruction)
+        Behavior:
+        - default: return action chunk (`predict_action_chunk`).
+        - when `observation.get("return_action_chunk") is False`: return single-step action.
+        """
+        use_chunk = bool(observation.get("return_action_chunk", True))
+        if use_chunk:
+            action = self.predict_action_chunk(observation)
         else:
-            action = self._predict_transformers_action(image, wrist_image, instruction)
-
-        return {"action": self._normalize_action(action)}
+            action = self.predict_action(observation)
+        return {"action": action}

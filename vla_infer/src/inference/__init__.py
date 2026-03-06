@@ -1,12 +1,10 @@
 """Inference abstractions for client/server runtime."""
 
 from .base import BaseInferenceClient, BaseInferenceServer
-from .client import AbstractInferenceClient
-from .server import AbstractInferenceServer
+from .client import InferenceClient
 
 __all__ = [
 	"BaseInferenceClient",
 	"BaseInferenceServer",
-	"AbstractInferenceClient",
-	"AbstractInferenceServer",
+	"InferenceClient",
 ]

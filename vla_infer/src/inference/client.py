@@ -8,19 +8,15 @@ import typing as t
 from .base import BaseInferenceClient
 
 
-class AbstractInferenceClient(BaseInferenceClient):
+class InferenceClient(BaseInferenceClient):
 	"""Reusable client loop based on five abstract lifecycle methods."""
 
 	def run_once(self) -> t.Dict[str, t.Any]:
 		observation = self.get_observation()
 		response = self.get_response(observation)
-		payload = self.unpack_response(response)
-		execution_report = self.execute(payload)
 		return {
 			"observation": observation,
 			"response": response,
-			"payload": payload,
-			"execution": execution_report,
 		}
 
 	def run(self, max_steps: int) -> None:

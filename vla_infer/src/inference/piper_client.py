@@ -8,11 +8,11 @@ import typing as t
 import draccus
 import numpy as np
 
-from vla_infer.src.inference.client import AbstractInferenceClient
+from vla_infer.src.inference.client import InferenceClient
 from vla_infer.src.process.action_preprocessor import ActionPreprocessor
 from vla_infer.src.process.image_preprocessor import ImagePreprocessor
 from vla_infer.src.robots.piper_single import PiperSingleRobot
-from vla_infer.src.zmq.zmq_client import VLAClient
+from vla_infer.src.zmq.zmq_client import VlaZmqClient
 
 # Reference
 @dataclass(frozen=True)
@@ -98,7 +98,7 @@ class InferenceConfig:
 		)
 
 
-class PiperVLAClient(AbstractInferenceClient):
+class PiperVLAClient(InferenceClient):
 	"""Client runtime that bridges PiperSingleRobot and VLA server.
 
 	Observation contract returned by `get_observation()`:
@@ -114,7 +114,7 @@ class PiperVLAClient(AbstractInferenceClient):
 		self,
 		cfg: InferenceConfig,
 		robot: t.Optional[PiperSingleRobot] = None,
-		client: t.Optional[VLAClient] = None,
+		client: t.Optional[VlaZmqClient] = None,
 		image_preprocessor: t.Optional[ImagePreprocessor] = None,
 		observation_action_preprocessor: t.Optional[ActionPreprocessor] = None,
 		action_postprocessor: t.Optional[ActionPreprocessor] = None,
@@ -129,7 +129,7 @@ class PiperVLAClient(AbstractInferenceClient):
 		self.zmq_client = (
 			client
 			if client is not None
-			else VLAClient(
+			else VlaZmqClient(
 				server_ip=cfg.server_ip,
 				port=cfg.port,
 				timeout_ms=cfg.timeout_ms,
@@ -180,21 +180,12 @@ class PiperVLAClient(AbstractInferenceClient):
 	) -> t.Any:
 		"""Abstract step 2: send observation and get server response."""
 		for key, value in observation.items():
-			if isinstance(value, np.ndarray):
-				logging.debug(
-					"get_response observation key=%s shape=%s dtype=%s",
-					key,
-					value.shape,
-					value.dtype,
-				)
-			else:
-				logging.debug("get_response observation key=%s type=%s", key, type(value))
+			if value is None:
+				logging.debug(f"Observation '{key}' shape={value.shape} dtype={value.dtype}")
+		observation["cmd"] = task_instruction or self.cfg.task_instruction
+		logging.debug(f"Observation 'cmd'='{observation['cmd']}'")
 
-		return self.zmq_client.get_action(
-			cmd_text=task_instruction or self.cfg.task_instruction,
-			obs_dict=observation,
-			jpeg_quality=self.cfg.jpeg_quality,
-		)
+		return self.zmq_client.get_response(obs_dict=observation)
 
 	def unpack_response(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
 		"""Abstract step 3: optional action postprocess + payload normalization."""

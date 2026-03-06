@@ -1,52 +1,55 @@
 import zmq
 import logging
 import typing as t
-
-from vla_infer.src.inference.server import AbstractInferenceServer
-from vla_infer.src.models.base import BaseVLAModel
-
+from abc import ABC, abstractmethod
 from .protocol import VLAProtocol
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-class VLAServer(AbstractInferenceServer):
-    def __init__(self, model: BaseVLAModel, port: int = 5555):
-        self.model = model
+
+class BaseZmqServer(ABC):
+
+    @abstractmethod
+    def get_request(self) -> t.Dict[str, t.Any]:
+        pass
+
+    @abstractmethod
+    def response(self, obs_dict: t.Dict[str, t.Any]) -> bytes:
+        pass
+
+    @abstractmethod
+    def close(self) -> None:
+        pass
+
+
+class VlaZmqServer(BaseZmqServer):
+    def __init__(self, ip: str = "127.0.0.1", port: int = 5555, jpeg_quality: int = 80):
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REP)
-        self.socket.bind(f"tcp://*:{port}")
-        
+        self.socket.setsockopt(zmq.LINGER, 0)
+        self.socket.bind(f"tcp://{ip}:{port}")
+
+        self.jpeg_quality = jpeg_quality
         self.cached_instruction = ""
-        logging.info(f"VLA Server ready on port {port}. Model: {model.__class__.__name__}")
+        self._is_closed = False
+        logging.info(f"ZMQ Server ready on tcp://{ip}:{port}")
 
-    def get_observation(self) -> bytes:
-        return self.socket.recv()
+    def get_request(self) -> t.Dict[str, t.Any]:
+        """Receive one request and return decoded payload."""
+        request_bytes = self.socket.recv()
+        return VLAProtocol.unpack_payload(request_bytes)
+    
+    def response(self, obs_dict: t.Dict[str, t.Any]) -> bytes:
+        """Pack response payload and send it back to client."""
+        response_bytes = VLAProtocol.pack_payload(obs_dict, jpeg_quality=self.jpeg_quality)
+        self.socket.send(response_bytes)
+        return response_bytes
 
-    def unpack_response(self, response: t.Any) -> t.Dict[str, t.Any]:
-        obs = VLAProtocol.unpack_payload(t.cast(bytes, response))
+    def close(self) -> None:
+        if self._is_closed:
+            return
 
-        if obs.get("use_cached_cmd", False):
-            obs["cmd"] = self.cached_instruction
-        else:
-            self.cached_instruction = obs.get("cmd", "")
-            logging.info(f"Server updated instruction cache: '{self.cached_instruction}'")
-
-        return obs
-
-    def get_response(self, observation: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
-        return self.model.predict(observation)
-
-    def execute(self, payload: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
-        # Server side default has no side-effect execution hook.
-        return {"sent_action_keys": list(payload.keys())}
-
-    def pack_and_send(self, payload: t.Dict[str, t.Any]) -> None:
-        reply_bytes = VLAProtocol.pack_payload(payload)
-        self.socket.send(reply_bytes)
-
-    def run(self):
-        try:
-            self.run_forever()
-        finally:
-            self.socket.close()
-            self.context.term()
+        self._is_closed = True
+        self.socket.close()
+        self.context.term()
+        logging.info("ZMQ server closed.")
