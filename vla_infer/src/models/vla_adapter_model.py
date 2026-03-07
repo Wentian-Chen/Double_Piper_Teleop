@@ -45,7 +45,7 @@ class VLAAdapterModel(BaseVLAModel):
     - This class does not modify ``sys.path``.
     - User should add the VLA-Adapter repo root to ``sys.path`` externally,
       then imports like ``experiments.robot.openvla_utils`` resolve normally.
-    - 7-dim state is converted to 8-dim for VLA-Adapter proprio projector.
+        - Proprio state is adapted to the model's expected ``PROPRIO_DIM`` (typically 7 or 8).
     """
 
     def __init__(
@@ -82,6 +82,7 @@ class VLAAdapterModel(BaseVLAModel):
         self._processor: t.Any = None
         self._get_vla_action: t.Any = None
         self._torch: t.Any = None
+        self._proprio_dim: int = 7
 
         self._default_instruction = ""
         super().__init__(model_path=model_path, device=device)
@@ -106,6 +107,14 @@ class VLAAdapterModel(BaseVLAModel):
     @staticmethod
     def _state_7d_to_8d(state_7d: np.ndarray) -> np.ndarray:
         return np.concatenate([state_7d[:6], np.zeros(1, dtype=np.float32), state_7d[6:]], axis=0)
+
+    def _format_state_for_model(self, state_7d: np.ndarray) -> np.ndarray:
+        """Adapt canonical 7D state to model-configured proprio dimension."""
+        if self._proprio_dim == 7:
+            return state_7d
+        if self._proprio_dim == 8:
+            return self._state_7d_to_8d(state_7d)
+        raise ValueError(f"Unsupported proprio_dim={self._proprio_dim}. Expected 7 or 8.")
 
     @staticmethod
     def _to_action_array(action: t.Any) -> np.ndarray:
@@ -160,6 +169,7 @@ class VLAAdapterModel(BaseVLAModel):
                 get_vla_action,
             )
             from experiments.robot.robot_utils import get_model
+            from prismatic.vla.constants import PROPRIO_DIM
         except Exception as exc:
             raise ImportError(
                 "Failed to import VLA-Adapter modules. Please add the VLA-Adapter repo root "
@@ -178,10 +188,11 @@ class VLAAdapterModel(BaseVLAModel):
             model.set_version(cfg.save_version)
 
         llm_dim = self._resolve_llm_dim(model)
+        self._proprio_dim = int(PROPRIO_DIM)
 
         proprio_projector = None
         if cfg.use_proprio:
-            proprio_projector = get_proprio_projector(cfg, llm_dim, proprio_dim=8)
+            proprio_projector = get_proprio_projector(cfg, llm_dim, proprio_dim=self._proprio_dim)
 
         action_head = None
         if cfg.use_l1_regression or cfg.use_diffusion:
@@ -215,7 +226,7 @@ class VLAAdapterModel(BaseVLAModel):
             "image_wrist": wrist_image,
         }
         if cfg.use_proprio:
-            policy_obs["state"] = self._state_7d_to_8d(state_7d)
+            policy_obs["state"] = self._format_state_for_model(state_7d)
 
         pred_actions = self._get_vla_action(
             cfg,
