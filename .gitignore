@@ -3,7 +3,7 @@
 
 # Ignore __pycache__ directory
 __pycache__/
-
+.pytest_cache
 # Ignore other Python cache files
 *.pyo
 *.pyd

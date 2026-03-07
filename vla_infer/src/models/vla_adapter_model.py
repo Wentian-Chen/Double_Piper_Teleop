@@ -1,32 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import typing as t
+from types import SimpleNamespace
 
 import numpy as np
 
 from .base import BaseVLAModel
-
-
-@dataclass
-class _AdapterEvalConfig:
-    pretrained_checkpoint: str
-    base_model_checkpoint: t.Optional[str] = None
-    model_family: str = "openvla"
-    use_l1_regression: bool = True
-    use_diffusion: bool = False
-    use_minivlm: bool = True
-    use_pro_version: bool = True
-    load_in_8bit: bool = False
-    load_in_4bit: bool = False
-    num_diffusion_steps: int = 50
-    use_film: bool = False
-    num_images_in_input: int = 2
-    use_proprio: bool = True
-    center_crop: bool = True
-    num_open_loop_steps: int = 1
-    unnorm_key: str = "pick_banana_50"
-    save_version: str = "vla-adapter"
 
 
 class VLAAdapterModel(BaseVLAModel):
@@ -74,7 +53,7 @@ class VLAAdapterModel(BaseVLAModel):
         self.unnorm_key = unnorm_key
         self.save_version = save_version
 
-        self._cfg: t.Optional[_AdapterEvalConfig] = None
+        self._cfg: t.Optional[t.Any] = None
         self._model: t.Any = None
         self._action_head: t.Any = None
         self._proprio_projector: t.Any = None
@@ -131,16 +110,22 @@ class VLAAdapterModel(BaseVLAModel):
         if self._cfg is None or self._model is None or self._get_vla_action is None:
             raise RuntimeError("VLAAdapterModel is not initialized. Call load_model first.")
 
-    def _build_cfg(self) -> _AdapterEvalConfig:
-        return _AdapterEvalConfig(
+    def _build_cfg(self) -> t.Any:
+        return SimpleNamespace(
             pretrained_checkpoint=self.model_path,
             base_model_checkpoint=self.base_model_checkpoint,
             model_family=self.model_family,
             use_l1_regression=self.use_l1_regression,
+            use_diffusion=False,
             use_minivlm=self.use_minivlm,
             use_pro_version=self.use_pro_version,
+            load_in_8bit=False,
+            load_in_4bit=False,
+            num_diffusion_steps=50,
+            use_film=False,
             num_images_in_input=self.num_images_in_input,
             use_proprio=self.use_proprio,
+            center_crop=True,
             num_open_loop_steps=max(1, int(self.num_open_loop_steps)),
             unnorm_key=self.unnorm_key,
             save_version=self.save_version,
@@ -214,7 +199,7 @@ class VLAAdapterModel(BaseVLAModel):
 
     def _predict_action_chunk_array(self, observation: t.Dict[str, t.Any]) -> np.ndarray:
         self._ensure_loaded()
-        cfg = t.cast(_AdapterEvalConfig, self._cfg)
+        cfg = t.cast(t.Any, self._cfg)
 
         cmd = str(observation.get("cmd", self._default_instruction) or self._default_instruction)
         image = self._validate_rgb_image("image", observation.get("image"))

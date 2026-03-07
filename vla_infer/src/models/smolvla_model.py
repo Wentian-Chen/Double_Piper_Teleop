@@ -1,18 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import typing as t
 
 import numpy as np
 
 from .base import BaseVLAModel
-
-
-@dataclass
-class _SmolVLAInputMapping:
-    head_image_key: str
-    wrist_image_key: t.Optional[str]
-    state_key: t.Optional[str]
 
 
 class SmolVLAModel(BaseVLAModel):
@@ -50,7 +42,7 @@ class SmolVLAModel(BaseVLAModel):
 
         self._default_instruction = ""
 
-        self._input_mapping: t.Optional[_SmolVLAInputMapping] = None
+        self._input_mapping: t.Optional[t.Dict[str, t.Optional[str]]] = None
         self._policy: t.Any = None
         self._preprocessor: t.Any = None
         self._postprocessor: t.Any = None
@@ -93,7 +85,7 @@ class SmolVLAModel(BaseVLAModel):
         return image_keys, state_keys
 
     @staticmethod
-    def _resolve_input_mapping(input_features: t.Dict[str, t.Any]) -> _SmolVLAInputMapping:
+    def _resolve_input_mapping(input_features: t.Dict[str, t.Any]) -> t.Dict[str, t.Optional[str]]:
         image_keys, state_keys = SmolVLAModel._candidate_input_keys(input_features)
         if not image_keys:
             raise RuntimeError("SmolVLA config has no image input features under `observation.images.*`")
@@ -117,11 +109,11 @@ class SmolVLAModel(BaseVLAModel):
         if state_key is None and state_keys:
             state_key = state_keys[0]
 
-        return _SmolVLAInputMapping(
-            head_image_key=head_key,
-            wrist_image_key=wrist_key,
-            state_key=state_key,
-        )
+        return {
+            "head_image_key": head_key,
+            "wrist_image_key": wrist_key,
+            "state_key": state_key,
+        }
 
     def _build_policy_input(
         self,
@@ -134,15 +126,17 @@ class SmolVLAModel(BaseVLAModel):
             raise RuntimeError("Input mapping is not initialized. Call load_model first.")
 
         payload: t.Dict[str, t.Any] = {
-            self._input_mapping.head_image_key: image,
+            t.cast(str, self._input_mapping["head_image_key"]): image,
             "task": cmd,
         }
 
-        if self._input_mapping.wrist_image_key is not None:
-            payload[self._input_mapping.wrist_image_key] = wrist_image
+        wrist_image_key = self._input_mapping["wrist_image_key"]
+        if wrist_image_key is not None:
+            payload[wrist_image_key] = wrist_image
 
-        if self._input_mapping.state_key is not None:
-            payload[self._input_mapping.state_key] = state
+        state_key = self._input_mapping["state_key"]
+        if state_key is not None:
+            payload[state_key] = state
 
         return payload
 

@@ -11,8 +11,12 @@ import numpy as np
 from vla_infer.src.inference.client import InferenceClient
 from vla_infer.src.robots.piper_single import PiperSingleRobot
 from vla_infer.src.zmq.zmq_client import VlaZmqClient
-
-
+from vla_infer.src.process.utils import (
+    adaptive_resize_image,
+    uint8_image_to_float32_01,
+    smooth_action_chunk,
+    delta_action_chunk_to_absolute
+)
 ArrayTransform = t.Callable[[np.ndarray], np.ndarray]
 
 
@@ -57,10 +61,6 @@ class PiperVLAClient(InferenceClient):
 		cfg: InferenceConfig,
 		robot: t.Optional[PiperSingleRobot] = None,
 		client: t.Optional[VlaZmqClient] = None,
-		image_transform: t.Optional[ArrayTransform] = None,
-		wrist_image_transform: t.Optional[ArrayTransform] = None,
-		state_transform: t.Optional[ArrayTransform] = None,
-		action_transform: t.Optional[ArrayTransform] = None,
 	) -> None:
 		self.cfg = cfg
 		logging.basicConfig(
@@ -78,15 +78,8 @@ class PiperVLAClient(InferenceClient):
 				timeout_ms=cfg.timeout_ms,
 			)
 		)
-
-		self.image_transform = image_transform
-		self.wrist_image_transform = wrist_image_transform
-		self.state_transform = state_transform
-		self.action_transform = action_transform
-
-		self._last_action_chunk: t.Optional[np.ndarray] = None
-		self._last_observation_report: t.Dict[str, t.Any] = {}
-		self._last_action_report: t.Dict[str, t.Any] = {}
+		self.obs: t.Dict[str, t.Any] = {}
+  
 
 	def get_observation(self) -> t.Dict[str, t.Any]:
 		"""Abstract step 1: collect and preprocess one observation payload."""
@@ -96,16 +89,13 @@ class PiperVLAClient(InferenceClient):
 			"image": raw_obs.get("cam_head"),
 			"wrist_image": raw_obs.get("cam_wrist"),
 		}
-
-		if self.image_transform is not None and obs["image"] is not None:
-			obs["image"] = self.image_transform(np.asarray(obs["image"]))
-
-		if self.wrist_image_transform is not None and obs["wrist_image"] is not None:
-			obs["wrist_image"] = self.wrist_image_transform(np.asarray(obs["wrist_image"]))
-
-		if self.state_transform is not None:
-			obs["state"] = self.state_transform(np.asarray(obs["state"], dtype=np.float32))
-
+		# adaptive resize image
+		obs["image"] = adaptive_resize_image(np.asarray(obs["image"]))
+		obs["wrist_image"] = adaptive_resize_image(np.asarray(obs["wrist_image"]))
+		# convert image to float32 [0, 1]
+		obs["image"] = uint8_image_to_float32_01(obs["image"])
+		obs["wrist_image"] = uint8_image_to_float32_01(obs["wrist_image"])
+		self.obs = obs # save for later use in get_response
 		return obs
 
 	def get_response(
@@ -113,30 +103,22 @@ class PiperVLAClient(InferenceClient):
 		observation: t.Dict[str, t.Any],
 		task_instruction: t.Optional[str] = None,
 	) -> t.Any:
-		"""Abstract step 2: send observation and get server response."""
+		"""send observation and get server response."""
 		for key, value in observation.items():
 			if value is not None and hasattr(value, "shape") and hasattr(value, "dtype"):
 				logging.debug(f"Observation '{key}' shape={value.shape} dtype={value.dtype}")
 		observation["cmd"] = task_instruction or self.cfg.task_instruction
 		logging.debug(f"Observation 'cmd'='{observation['cmd']}'")
+		action = self.zmq_client.get_response(obs_dict=observation)["action"]
+		abs_action = delta_action_chunk_to_absolute(self.obs["state"],action)
+		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+		return {"action": smooth_action}
 
-		return self.zmq_client.get_response(obs_dict=observation)
-
-	def unpack_response(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
-		"""Abstract step 3: optional action postprocess + payload normalization."""
-		if "action" not in response:
-			raise KeyError("Server response missing required key 'action'")
-
-		if self.action_transform is not None:
-			response["action"] = self.action_transform(np.asarray(response.get("action"), dtype=np.float32))
-
-		self._last_action_chunk = np.asarray(response["action"], dtype=np.float32)
-		return response
 
 	def execute(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
-		"""Abstract step 4: execute action chunk on robot."""
+		"""execute action chunk on robot."""
 		action = np.asarray(response["action"], dtype=np.float32)
-
+		
 		if action.ndim == 1:
 			action_2d = action[None, :]
 		elif action.ndim == 2:
@@ -155,23 +137,16 @@ class PiperVLAClient(InferenceClient):
 			"executed_steps": execute_steps,
 			"action_shape": tuple(action_2d.shape),
 		}
-
+	
 	def run_once(self) -> t.Dict[str, t.Any]:
 		"""Run one full observe-send-receive-execute cycle."""
 		observation = self.get_observation()
 		response = self.get_response(observation)
-		action = self.unpack_response(response)
-		execution_result = self.execute(action)
+		execution_result = self.execute(response)
 
 		return {
-			"observation": {
-				"payload": observation,
-				"report": self._last_observation_report,
-			},
-			"action": {
-				"payload": action,
-				"report": self._last_action_report,
-			},
+			"observation": observation,
+			"action":  response,
 			"execution": execution_result,
 		}
 
