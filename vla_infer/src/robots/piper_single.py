@@ -4,6 +4,13 @@ import typing as t
 import time 
 import numpy as np
 from .base import BaseRobot
+from dataclasses import dataclass
+@dataclass
+class GetObservationKey:
+    """观测键配置，定义 PiperSingle 适配器关注的图像键和状态键。"""
+    image_keys: t.Sequence[str] = ("cam_head", "cam_wrist")
+    state_keys: t.Sequence[str] = ("joint", "qpos", "gripper", "state")
+
 
 
 class PiperSingleRobot(BaseRobot):

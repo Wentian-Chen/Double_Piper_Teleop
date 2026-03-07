@@ -31,16 +31,13 @@ class InferenceConfig:
 	jpeg_quality: int = 80
 
 	auto_setup: bool = True
-	task_instruction: str = "pick up the banana"
+	task_instruction: str = "Pick up the banana and place it in the container"
 	max_steps: int = 1000
 	stop_on_timeout: bool = True
 
 	action_key: str = "action"
-	execute_chunk_steps: int = 1
+	execute_chunk_steps: int = 8
 	control_interval_s: float = 0.04
-	include_prev_action: bool = True
-	prev_action_key: str = "prev_action"
-
 	log_level: str = "INFO"
 
 
@@ -60,7 +57,7 @@ class PiperVLAClient(InferenceClient):
 		self,
 		cfg: InferenceConfig,
 		robot: t.Optional[PiperSingleRobot] = None,
-		client: t.Optional[VlaZmqClient] = None,
+		client: t.Optional[Vllog_levelaZmqClient] = None,
 	) -> None:
 		self.cfg = cfg
 		logging.basicConfig(

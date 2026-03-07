@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 import logging
 import typing as t
@@ -12,7 +10,11 @@ from vla_infer.src.zmq.zmq_server import VlaZmqServer
 
 draccus_wrap = t.cast(t.Callable[..., t.Callable[..., t.Any]], getattr(draccus, "wrap"))
 
+"""
+python example/vla-adapter/vla-adapter_server.py \
+    --model_path /home/charles/workspaces/VLA-Adapter/outputs/configs+piper_pick_banana_100_resize_224_converted+b16+lr-0.0002+lora-r64+dropout-0.0--image_aug--train-0306-02--20000_chkpt/model.pt
 
+"""
 @dataclass
 class VLAAdapterServerConfig:
     """Runtime config for launching VLA-Adapter inference server."""
@@ -37,9 +39,7 @@ class VLAAdapterServerConfig:
     log_level: str = "INFO"
 
 @draccus_wrap()
-def main(cfg: t.Optional[VLAAdapterServerConfig] = None) -> None:
-    if cfg is None:
-        cfg = VLAAdapterServerConfig()
+def main(cfg: VLAAdapterServerConfig) -> None:
 
     if not cfg.model_path:
         raise ValueError("model_path must be provided")
@@ -49,7 +49,8 @@ def main(cfg: t.Optional[VLAAdapterServerConfig] = None) -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     logging.info("Starting VLA-Adapter server on tcp://%s:%s", cfg.ip, cfg.port)
-
+    
+    zmq_server = VlaZmqServer(ip=cfg.ip, port=cfg.port, jpeg_quality=cfg.jpeg_quality)
     model = VLAAdapterModel(
         model_path=cfg.model_path,
         device=cfg.device,
@@ -64,7 +65,7 @@ def main(cfg: t.Optional[VLAAdapterServerConfig] = None) -> None:
         unnorm_key=cfg.unnorm_key,
         save_version=cfg.save_version,
     )
-    zmq_server = VlaZmqServer(ip=cfg.ip, port=cfg.port, jpeg_quality=cfg.jpeg_quality)
+    
     server = ModelZmqInferenceServer(model=model, zmq_server=zmq_server)
     server.start()
 

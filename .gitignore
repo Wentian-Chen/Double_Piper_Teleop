@@ -9,6 +9,8 @@ __pycache__/
 *.pyd
 *.log
 脚本.txt
+build/
+*.egg-info/
 # datasets
 datasets/
 save/
