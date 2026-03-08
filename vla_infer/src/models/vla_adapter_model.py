@@ -1,12 +1,42 @@
 from __future__ import annotations
 
 import typing as t
-from types import SimpleNamespace
-
+import torch
 import numpy as np
-
 from .base import BaseVLAModel
-
+from dataclasses import dataclass
+from pathlib import Path
+try:
+    from experiments.robot.openvla_utils import (
+        get_action_head,
+        get_processor,
+        get_proprio_projector,
+        get_vla_action,
+    )
+    from experiments.robot.robot_utils import get_model
+except Exception as exc:
+    raise ImportError(
+        "Failed to import VLA-Adapter modules. Please add the VLA-Adapter repo root "
+        "to sys.path before creating VLAAdapterModel."
+    ) from exc
+    
+@dataclass
+class VLAAdapterModelConfig:
+    pretrained_checkpoint: t.Union[str, Path] = ""
+    model_family: str = "openvla"
+    use_l1_regression: bool = True
+    use_minivlm: bool = True
+    use_pro_version: bool = True
+    use_proprio: bool = True
+    num_images_in_input: int = 2
+    num_open_loop_steps: int = 8
+    load_in_8bit: bool = False     
+    load_in_4bit: bool = False
+    task_suite_name: str = ""
+    save_version: str = "vla-adapter"
+    unnorm_key: str = ""
+    use_film: bool = False
+    center_crop: bool = False
 
 class VLAAdapterModel(BaseVLAModel):
     """VLA-Adapter server-side wrapper aligned with official Dream-Adapter inference.
@@ -29,42 +59,46 @@ class VLAAdapterModel(BaseVLAModel):
 
     def __init__(
         self,
-        model_path: str,
-        device: str = "cuda",
-        base_model_checkpoint: t.Optional[str] = None,
+        pretrained_checkpoint: t.Union[str, Path] = "",
         model_family: str = "openvla",
         use_l1_regression: bool = True,
-        use_minivlm: bool = True,
+        use_minivlm: bool = True,   
         use_pro_version: bool = True,
         use_proprio: bool = True,
         num_images_in_input: int = 2,
-        num_open_loop_steps: int = 1,
-        unnorm_key: str = "pick_banana_50",
+        num_open_loop_steps: int = 8,
+        load_in_8bit: bool = False,
+        load_in_4bit: bool = False,
+        task_suite_name: str = "",
         save_version: str = "vla-adapter",
+        use_film: bool = False,
+        proprio_dim : int = 7,
+        default_instruction: str = ""
     ) -> None:
-        self.base_model_checkpoint = base_model_checkpoint
-        self.model_family = model_family
-        self.use_l1_regression = use_l1_regression
-        self.use_minivlm = use_minivlm
-        self.use_pro_version = use_pro_version
-        self.use_proprio = use_proprio
-        self.num_images_in_input = num_images_in_input
-        self.num_open_loop_steps = num_open_loop_steps
-        self.unnorm_key = unnorm_key
-        self.save_version = save_version
-
-        self._cfg: t.Optional[t.Any] = None
+        self.cfg = VLAAdapterModelConfig(
+            pretrained_checkpoint=pretrained_checkpoint,
+            model_family=model_family,
+            use_l1_regression=use_l1_regression,
+            use_minivlm=use_minivlm,    
+            use_pro_version=use_pro_version,
+            use_proprio=use_proprio,
+            num_images_in_input=num_images_in_input,
+            num_open_loop_steps=num_open_loop_steps,
+            load_in_8bit=load_in_8bit,
+            load_in_4bit=load_in_4bit,
+            save_version=save_version,
+            task_suite_name=task_suite_name,
+            use_film=use_film,
+        )
         self._model: t.Any = None
         self._action_head: t.Any = None
         self._proprio_projector: t.Any = None
-        self._noisy_action_projector: t.Any = None
         self._processor: t.Any = None
         self._get_vla_action: t.Any = None
-        self._torch: t.Any = None
-        self._proprio_dim: int = 7
-
-        self._default_instruction = ""
-        super().__init__(model_path=model_path, device=device)
+        
+        self._proprio_dim: int = proprio_dim
+        self._default_instruction = default_instruction
+        super().__init__()
 
     @staticmethod
     def _validate_rgb_image(name: str, value: t.Any) -> np.ndarray:
@@ -77,10 +111,10 @@ class VLAAdapterModel(BaseVLAModel):
         return value
 
     @staticmethod
-    def _validate_state_7d(value: t.Any) -> np.ndarray:
-        state = np.asarray(value, dtype=np.float32).reshape(-1)
-        if state.shape[0] != 7:
-            raise ValueError(f"state must be shape (7,), got {state.shape}")
+    def _validate_state(state: t.Any, proprio_dim: int) -> np.ndarray:
+        state = np.asarray(state, dtype=np.float32).reshape(-1)
+        if state.shape[0] != proprio_dim:
+            raise ValueError(f"state must be shape ({proprio_dim},), got {state.shape}")
         return state
 
     @staticmethod
@@ -107,123 +141,73 @@ class VLAAdapterModel(BaseVLAModel):
         return action_np
 
     def _ensure_loaded(self) -> None:
-        if self._cfg is None or self._model is None or self._get_vla_action is None:
+        if self.cfg is None or self._model is None or self._get_vla_action is None:
             raise RuntimeError("VLAAdapterModel is not initialized. Call load_model first.")
 
-    def _build_cfg(self) -> t.Any:
-        return SimpleNamespace(
-            pretrained_checkpoint=self.model_path,
-            base_model_checkpoint=self.base_model_checkpoint,
-            model_family=self.model_family,
-            use_l1_regression=self.use_l1_regression,
-            use_diffusion=False,
-            use_minivlm=self.use_minivlm,
-            use_pro_version=self.use_pro_version,
-            load_in_8bit=False,
-            load_in_4bit=False,
-            num_diffusion_steps=50,
-            use_film=False,
-            num_images_in_input=self.num_images_in_input,
-            use_proprio=self.use_proprio,
-            center_crop=True,
-            num_open_loop_steps=max(1, int(self.num_open_loop_steps)),
-            unnorm_key=self.unnorm_key,
-            save_version=self.save_version,
-        )
-
     @staticmethod
-    def _resolve_llm_dim(model: t.Any) -> int:
+    def _resolve_llm_dim(model: t.Any) -> t.Optional[int]:
         llm_dim = getattr(model, "llm_dim", None)
         if isinstance(llm_dim, int):
             return llm_dim
+        return None 
+    def check_unnorm_key(self, model) -> None:
+        """Check that the model contains the action un-normalization key."""
+        # Initialize unnorm_key
+        unnorm_key = self.cfg.task_suite_name
 
-        text_cfg = getattr(getattr(model, "config", None), "text_config", None)
-        hidden_size = getattr(text_cfg, "hidden_size", None)
-        if isinstance(hidden_size, int):
-            return hidden_size
-        return 4096
+        # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
+        # with the suffix "_no_noops" in the dataset name)
+        if unnorm_key not in model.norm_stats and f"{unnorm_key}_no_noops" in model.norm_stats:
+            unnorm_key = f"{unnorm_key}_no_noops"
 
+        assert unnorm_key in model.norm_stats, f"Action un-norm key {unnorm_key} not found in VLA `norm_stats`!"
+
+        # Set the unnorm_key in cfg
+        self.cfg.unnorm_key = unnorm_key
+    
     def load_model(self) -> None:
         """Load VLA-Adapter model and inference components."""
-        try:
-            import torch
-            from experiments.robot.openvla_utils import (
-                get_action_head,
-                get_processor,
-                get_proprio_projector,
-                get_vla_action,
-            )
-            from experiments.robot.robot_utils import get_model
-            from prismatic.vla.constants import PROPRIO_DIM
-        except Exception as exc:
-            raise ImportError(
-                "Failed to import VLA-Adapter modules. Please add the VLA-Adapter repo root "
-                "to sys.path before creating VLAAdapterModel."
-            ) from exc
+        self._model = get_model(self.cfg)
+        if hasattr(self._model, "set_version"):
+            self._model.set_version(self.cfg.save_version)
+        llm_dim = self._resolve_llm_dim(self._model)
+        if self.cfg.use_proprio:
+            self._proprio_projector = get_proprio_projector(self.cfg, llm_dim, proprio_dim=self._proprio_dim)
 
-        self._torch = torch
-        if not self.device:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        if str(self.device).startswith("cuda") and not torch.cuda.is_available():
-            self.device = "cpu"
+        if self.cfg.use_l1_regression:
+            self._action_head = get_action_head(self.cfg, llm_dim)
+            
+        if self.cfg.model_family == "openvla":
+            self._processor = get_processor(self.cfg)
+            self.check_unnorm_key(self._model)
 
-        cfg = self._build_cfg()
-        model = get_model(cfg)
-        if hasattr(model, "set_version"):
-            model.set_version(cfg.save_version)
-
-        llm_dim = self._resolve_llm_dim(model)
-        self._proprio_dim = int(PROPRIO_DIM)
-
-        proprio_projector = None
-        if cfg.use_proprio:
-            proprio_projector = get_proprio_projector(cfg, llm_dim, proprio_dim=self._proprio_dim)
-
-        action_head = None
-        if cfg.use_l1_regression or cfg.use_diffusion:
-            action_head = get_action_head(cfg, llm_dim)
-
-        processor = get_processor(cfg) if cfg.model_family == "openvla" else None
-
-        if hasattr(model, "to"):
-            model = model.to(self.device)
-        model.eval()
-
-        self._cfg = cfg
-        self._model = model
-        self._action_head = action_head
-        self._proprio_projector = proprio_projector
-        self._noisy_action_projector = None
-        self._processor = processor
         self._get_vla_action = get_vla_action
 
     def _predict_action_chunk_array(self, observation: t.Dict[str, t.Any]) -> np.ndarray:
         self._ensure_loaded()
-        cfg = t.cast(t.Any, self._cfg)
 
         cmd = str(observation.get("cmd", self._default_instruction) or self._default_instruction)
         image = self._validate_rgb_image("image", observation.get("image"))
         wrist_image = self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
-        state_7d = self._validate_state_7d(observation.get("state"))
-
+        state_7d = self._validate_state(observation.get("state"), self._proprio_dim)
+        # convert obs dict to model input format, run inference, and post-process action output
         policy_obs: t.Dict[str, t.Any] = {
             "full_image": image,
             "image_wrist": wrist_image,
         }
-        if cfg.use_proprio:
+        if self.cfg.use_proprio:
             policy_obs["state"] = self._format_state_for_model(state_7d)
 
         pred_actions = self._get_vla_action(
-            cfg,
-            self._model,
-            self._processor,
-            policy_obs,
-            cmd,
+            cfg=self.cfg,
+            vla=self._model,
+            processor=self._processor,
+            obs=policy_obs,
+            task_label=cmd,
             action_head=self._action_head,
             proprio_projector=self._proprio_projector,
-            noisy_action_projector=self._noisy_action_projector,
-            use_film=cfg.use_film,
-            use_minivlm=cfg.use_minivlm,
+            use_film=self.cfg.use_film,
+            use_minivlm=self.cfg.use_minivlm,
         )
         return self._to_action_array(pred_actions)
 

@@ -16,9 +16,7 @@ class BaseVLAModel(ABC):
     """
     VLA 模型统一基类。运行在 Server 端
     """
-    def __init__(self, model_path: str, device: str = "cuda"):
-        self.model_path = model_path
-        self.device = device
+    def __init__(self):
         self.load_model()
 
     @abstractmethod

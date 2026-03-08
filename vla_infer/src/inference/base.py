@@ -27,11 +27,10 @@ class BaseInferenceClient(ABC):
 class BaseInferenceServer(ABC):
 	"""Server-side inference pipeline contract."""
 	@abstractmethod
-	def start(self) -> None:
-		"""Start server loop, receive requests, run inference, and send responses."""
-		raise NotImplementedError
-	@abstractmethod
 	def predict(self, request: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
 		"""Predict one response payload for a decoded request."""
 		raise NotImplementedError
-
+	@abstractmethod
+	def start(self) -> None:
+		"""Start the inference server."""
+		raise NotImplementedError

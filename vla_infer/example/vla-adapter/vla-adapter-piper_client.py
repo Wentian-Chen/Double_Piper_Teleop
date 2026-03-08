@@ -57,7 +57,7 @@ class PiperVLAClient(InferenceClient):
 		self,
 		cfg: InferenceConfig,
 		robot: t.Optional[PiperSingleRobot] = None,
-		client: t.Optional[Vllog_levelaZmqClient] = None,
+		client: t.Optional[VlaZmqClient] = None,
 	) -> None:
 		self.cfg = cfg
 		logging.basicConfig(
@@ -101,12 +101,17 @@ class PiperVLAClient(InferenceClient):
 		task_instruction: t.Optional[str] = None,
 	) -> t.Any:
 		"""send observation and get server response."""
+		# Log observation details for debugging.
 		for key, value in observation.items():
 			if value is not None and hasattr(value, "shape") and hasattr(value, "dtype"):
 				logging.debug(f"Observation '{key}' shape={value.shape} dtype={value.dtype}")
+    	# set cmd to task_instruction if provided, otherwise use default from config
 		observation["cmd"] = task_instruction or self.cfg.task_instruction
 		logging.debug(f"Observation 'cmd'='{observation['cmd']}'")
+		# send observation to server and get response
+		# response = {"action": np.ndarray(T, D), ...}
 		action = self.zmq_client.get_response(obs_dict=observation)["action"]
+		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
 		abs_action = delta_action_chunk_to_absolute(self.obs["state"],action)
 		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
 		return {"action": smooth_action}
@@ -115,7 +120,7 @@ class PiperVLAClient(InferenceClient):
 	def execute(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
 		"""execute action chunk on robot."""
 		action = np.asarray(response["action"], dtype=np.float32)
-		
+		# ensure action is 2D (T, D)
 		if action.ndim == 1:
 			action_2d = action[None, :]
 		elif action.ndim == 2:
@@ -142,7 +147,6 @@ class PiperVLAClient(InferenceClient):
 		execution_result = self.execute(response)
 
 		return {
-			"observation": observation,
 			"action":  response,
 			"execution": execution_result,
 		}

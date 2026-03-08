@@ -11,15 +11,7 @@ from vla_infer.src.zmq.zmq_server import BaseZmqServer
 
 
 class ModelZmqInferenceServer(BaseInferenceServer):
-    """Inference runtime that composes model + ZMQ transport.
-
-    The main loop lives here (not in ZMQ transport):
-
-        while True:
-            request_dict = zmq_server.get_request()
-            response_dict = self.predict(request_dict)
-            zmq_server.response(response_dict)
-    """
+    """Inference runtime that composes model + ZMQ transport."""
 
     def __init__(self, model: BaseVLAModel, zmq_server: BaseZmqServer) -> None:
         self.model = model
@@ -38,10 +30,8 @@ class ModelZmqInferenceServer(BaseInferenceServer):
         response_dict = self.predict(request_dict)
         self.zmq_server.response(response_dict)
         return {
-            "request": request_dict,
             "response": response_dict,
         }
-
     def start(self) -> None:
         """Start continuous inference loop and handle graceful shutdown."""
         logging.info("Starting inference server loop")
