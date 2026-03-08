@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 import logging
 import time
@@ -13,10 +11,17 @@ from vla_infer.src.robots.piper_single import PiperSingleRobot
 from vla_infer.src.zmq.zmq_client import VlaZmqClient
 from vla_infer.src.process.utils import (
     adaptive_resize_image,
+	ensure_hwc3_uint8_image,
     uint8_image_to_float32_01,
     smooth_action_chunk,
-    delta_action_chunk_to_absolute
+    delta_action_chunk_to_absolute,
+	check_uint8_rgb
 )
+import sys
+from pathlib import Path
+THIS_FILE = Path(__file__).resolve()
+REPO_ROOT = THIS_FILE.parents[3]
+sys.path.append(str(REPO_ROOT))
 ArrayTransform = t.Callable[[np.ndarray], np.ndarray]
 
 
@@ -66,6 +71,7 @@ class PiperVLAClient(InferenceClient):
 		)
 
 		self.robot = robot if robot is not None else PiperSingleRobot(auto_setup=cfg.auto_setup)
+		self.robot.setup()  # Ensure robot is ready before connecting to server
 		self.zmq_client = (
 			client
 			if client is not None
@@ -86,12 +92,13 @@ class PiperVLAClient(InferenceClient):
 			"image": raw_obs.get("cam_head"),
 			"wrist_image": raw_obs.get("cam_wrist"),
 		}
-		# adaptive resize image
-		obs["image"] = adaptive_resize_image(np.asarray(obs["image"]))
-		obs["wrist_image"] = adaptive_resize_image(np.asarray(obs["wrist_image"]))
-		# convert image to float32 [0, 1]
-		obs["image"] = uint8_image_to_float32_01(obs["image"])
-		obs["wrist_image"] = uint8_image_to_float32_01(obs["wrist_image"])
+		
+		obs["image"] = check_uint8_rgb(adaptive_resize_image(obs["image"]))
+		obs["wrist_image"] = check_uint8_rgb(adaptive_resize_image(obs["wrist_image"]))
+		# Ensure images are HWC3 uint8 before resize to satisfy model input contract.
+		# obs["image"] = ensure_hwc3_uint8_image(np.asarray(obs["image"]))
+		# obs["wrist_image"] = ensure_hwc3_uint8_image(np.asarray(obs["wrist_image"]))
+		# # adaptive resize image
 		self.obs = obs # save for later use in get_response
 		return obs
 
@@ -173,9 +180,6 @@ class PiperVLAClient(InferenceClient):
 	def close(self) -> None:
 		"""Close network resources."""
 		self.zmq_client.close()
-
-
-PiperClientConfig = InferenceConfig
 
 
 @draccus.wrap()
