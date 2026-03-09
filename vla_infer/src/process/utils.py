@@ -32,6 +32,78 @@ def _to_hwc3_uint8(image: np.ndarray) -> np.ndarray:
         )
     raise TypeError(f"unsupported image dtype: {image.dtype}")
 
+def check_uint8_rgb(image: np.ndarray) -> np.ndarray:
+    if image.dtype != np.uint8:
+        image = image.astype(np.uint8)
+    if image.ndim != 3 or image.shape[-1] != 3:
+        raise ValueError(f"Expected HWC RGB image, got {image.shape}")
+    return np.ascontiguousarray(image)
+def ensure_hwc3_image(image: np.ndarray) -> np.ndarray:
+    """Convert image to HWC3 layout.
+
+    Supports input shapes: HxW, HxWx1, HxWx3, HxWx4, 1xHxW, 3xHxW, 4xHxW.
+    """
+    if not isinstance(image, np.ndarray):
+        image = np.asarray(image)
+
+    if image.ndim == 2:
+        return np.repeat(image[:, :, None], repeats=3, axis=2)
+
+    if image.ndim != 3:
+        raise ValueError(f"image must be 2D or 3D, got shape={image.shape}")
+
+    # HWC path
+    if image.shape[-1] in (1, 3, 4):
+        if image.shape[-1] == 1:
+            return np.repeat(image, repeats=3, axis=2)
+        if image.shape[-1] == 4:
+            return image[:, :, :3]
+        return image
+
+    # CHW path
+    if image.shape[0] in (1, 3, 4):
+        chw_to_hwc = np.transpose(image, (1, 2, 0))
+        if chw_to_hwc.shape[-1] == 1:
+            return np.repeat(chw_to_hwc, repeats=3, axis=2)
+        if chw_to_hwc.shape[-1] == 4:
+            return chw_to_hwc[:, :, :3]
+        return chw_to_hwc
+
+    raise ValueError(f"unable to convert image to HxWx3, got shape={image.shape}")
+
+
+def ensure_uint8_image(image: np.ndarray) -> np.ndarray:
+    """Convert image to uint8.
+
+    Float input in [0, 1] is scaled to [0, 255]. Other numeric dtypes are
+    clipped to [0, 255] then cast to uint8.
+    """
+    if not isinstance(image, np.ndarray):
+        image = np.asarray(image)
+
+    if image.dtype == np.uint8:
+        return image.copy()
+
+    if np.issubdtype(image.dtype, np.floating):
+        finite = image[np.isfinite(image)]
+        if finite.size == 0:
+            return np.zeros_like(image, dtype=np.uint8)
+        min_value = float(np.min(finite))
+        max_value = float(np.max(finite))
+        if min_value >= -1e-6 and max_value <= 1.0 + 1e-6:
+            return (np.clip(image, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+        return np.clip(image, 0.0, 255.0).round().astype(np.uint8)
+
+    if np.issubdtype(image.dtype, np.integer):
+        return np.clip(image, 0, 255).astype(np.uint8)
+
+    raise TypeError(f"unsupported image dtype: {image.dtype}")
+
+
+def ensure_hwc3_uint8_image(image: np.ndarray) -> np.ndarray:
+    """Convert image to HWC3 uint8."""
+    return ensure_uint8_image(ensure_hwc3_image(image))
+
 
 def detect_color_order(image: np.ndarray) -> str:
     """Estimate whether channel ordering is likely RGB or BGR."""
@@ -457,6 +529,9 @@ def delta_action_chunk_to_absolute(
 
 
 __all__ = [
+    "ensure_hwc3_image",
+    "ensure_uint8_image",
+    "ensure_hwc3_uint8_image",
     "detect_color_order",
     "check_image_dtype_and_range",
     "crop_image",
