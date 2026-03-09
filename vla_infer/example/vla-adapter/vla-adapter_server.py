@@ -43,7 +43,7 @@ class VLAAdapterServerConfig:
     save_version: str = "vla-adapter"
     # Task suite name.
     task_suite_name: str = "piper_pick_banana_100_resize_224_converted"
-    ip: str = "127.0.0.1"
+    ip: str = "0.0.0.0"
     port: int = 5555
     jpeg_quality: int = 80
     log_level: str = "INFO"

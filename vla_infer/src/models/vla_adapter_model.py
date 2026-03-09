@@ -11,9 +11,9 @@ try:
         get_action_head,
         get_processor,
         get_proprio_projector,
-        get_vla_action,
+        get_reconstruct_images,
     )
-    from experiments.robot.robot_utils import get_model
+    from experiments.robot.robot_utils import get_model,get_action
 except Exception as exc:
     raise ImportError(
         "Failed to import VLA-Adapter modules. Please add the VLA-Adapter repo root "
@@ -36,8 +36,9 @@ class VLAAdapterModelConfig:
     save_version: str = "vla-adapter"
     unnorm_key: str = ""
     use_film: bool = False
+    use_reconstruct_images: bool = True
     center_crop: bool = False
-
+    predict_image_frame: int = 1
 class VLAAdapterModel(BaseVLAModel):
     """VLA-Adapter server-side wrapper aligned with official Dream-Adapter inference.
 
@@ -73,7 +74,9 @@ class VLAAdapterModel(BaseVLAModel):
         save_version: str = "vla-adapter",
         use_film: bool = False,
         proprio_dim : int = 7,
-        default_instruction: str = ""
+        use_reconstruct_images: bool = True,
+        default_instruction: str = "",
+        predict_image_frame: int = 1       
     ) -> None:
         self.cfg = VLAAdapterModelConfig(
             pretrained_checkpoint=pretrained_checkpoint,
@@ -88,14 +91,16 @@ class VLAAdapterModel(BaseVLAModel):
             load_in_4bit=load_in_4bit,
             save_version=save_version,
             task_suite_name=task_suite_name,
+            use_reconstruct_images=use_reconstruct_images,
             use_film=use_film,
+            predict_image_frame=predict_image_frame
         )
         self._model: t.Any = None
         self._action_head: t.Any = None
         self._proprio_projector: t.Any = None
         self._processor: t.Any = None
         self._get_vla_action: t.Any = None
-        
+        self._reconstruct_images: t.Any = None
         self._proprio_dim: int = proprio_dim
         self._default_instruction = default_instruction
         super().__init__()
@@ -181,7 +186,10 @@ class VLAAdapterModel(BaseVLAModel):
             self._processor = get_processor(self.cfg)
             self.check_unnorm_key(self._model)
 
-        self._get_vla_action = get_vla_action
+        if self.cfg.use_reconstruct_images:
+            self._reconstruct_images = get_reconstruct_images(self.cfg, self._model.llm_dim, image_dim=588, predict_image_frame=self.cfg.predict_image_frame)
+    
+            self._get_vla_action = get_action
 
     def _predict_action_chunk_array(self, observation: t.Dict[str, t.Any]) -> np.ndarray:
         self._ensure_loaded()
@@ -200,12 +208,13 @@ class VLAAdapterModel(BaseVLAModel):
 
         pred_actions = self._get_vla_action(
             cfg=self.cfg,
-            vla=self._model,
+            model=self._model,
             processor=self._processor,
             obs=policy_obs,
             task_label=cmd,
             action_head=self._action_head,
             proprio_projector=self._proprio_projector,
+            reconstruct_images=self._reconstruct_images,
             use_film=self.cfg.use_film,
             use_minivlm=self.cfg.use_minivlm,
         )

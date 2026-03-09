@@ -1,164 +1,92 @@
 # vla_infer
 
-基于 ZMQ 的 VLA 推理部署模块，采用 `Client -> Server -> Model` 架构。
+基于 ZMQ 的 VLA（Vision-Language-Action）推理部署模块，旨在为机器人提供延迟低、易扩展的远程推理能力。采用 `Client -> Server -> Model` 的解耦架构。
 
-## 1. 安装
+## 1. 核心架构
+
+- **`src/zmq/`**: 底层通信层。基于 ZeroMQ 实现高效的请求-响应模型，内置自动的图像 JPEG 压缩/解压，显著降低网络带宽需求。
+- **`src/models/`**: 模型抽象与适配层。
+  - `base.py`: 定义 `BaseVLAModel` 接口。
+  - `smolvla_model.py`: 封装 [SmolVLA](https://huggingface.co/blog/smolvla)，支持 LeRobot 转换后的模型。
+  - `vla_adapter_model.py`: 封装 [VLA-Adapter](https://github.com/vla-adapter/VLA-Adapter)。
+- **`src/inference/`**: 服务逻辑封装。
+  - `server.py`: `ModelZmqInferenceServer` 串联 ZMQ Server 与模型实例。
+  - `client.py`: 提供高层 API，支持动作块（Action ChunkING）平滑处理。
+- **`src/robots/`**: 硬件适配层。针对 Piper 机器人及其相机系统的深度集成。
+- **`src/process/`**: 图像预处理与动作后处理（如平滑转换）。
+
+## 2. 快速开始
+
+### 2.1 安装
+
+建议在专用虚拟环境中安装：
 
 ```bash
 cd vla_infer
-pip install -r requirements.txt
+pip install -e .
 ```
 
-> 说明：`smolvla` 与 `vla-adapter` 模型本身依赖 `torch/transformers/lerobot` 等，请按各自模型目录依赖完成安装。
+> **注意**：模型依赖（如 `torch`, `transformers`, `lerobot`）需根据所使用的模型单独配置。
 
-## 2. 架构说明
+### 2.2 启动推理服务端 (Server)
 
-- `vla_infer/client.py`：发送观测请求，接收动作回复。
-- `vla_infer/server.py`：承载模型实例，循环处理请求。
-- `vla_infer/protocol.py`：字典序列化协议，自动处理图像编码/解码。
-- `vla_infer/models/base.py`：模型统一抽象基类 `BaseVLAModel`。
-- `vla_infer/models/smolvla_model.py`：SmolVLA 的标准封装实现。
-- `vla_infer/models/vla_adapter_model.py`：VLA-Adapter 的标准封装实现。
-- `vla_infer/robots/base.py`：机器人抽象接口。
-- `vla_infer/robots/piper_single.py`：PiperSingle 适配层（复用原有相机能力，不重写 camera）。
+以 VLA-Adapter 为例，可以使用提供的示例脚本：
 
-## 3. 字典协议规范
-
-### 3.1 请求字典（Client -> Server）
-
-推荐格式：
-
-```python
-{
-	"cmd": "pick up the banana and put it into the bowl",  # str, 任务指令
-	"cam_head": np.ndarray((H, W, 3), dtype=np.uint8),      # RGB 头相机
-	"cam_wrist": np.ndarray((H, W, 3), dtype=np.uint8),     # RGB 腕相机
-	"state": np.ndarray((7,), dtype=np.float32),            # [joint(6), gripper(1)]
-}
+```bash
+# 需指定模型路径
+python example/vla-adapter/vla-adapter_server.py --model_path /path/to/your/checkpoint
 ```
 
-可兼容的图像键别名：
-
-- 头相机：`cam_head | image_head | front_image | full_image`
-- 腕相机：`cam_wrist | image_wrist | wrist_image`
-
-可兼容的状态键别名：
-
-- `state | robot_state | proprio`
-
-缓存指令机制字段（可选）：
-
+手动启动逻辑：
 ```python
-{
-	"use_cached_cmd": bool,
-	"cmd": str,
-}
+from vla_infer.src.models import VLAAdapterModel
+from vla_infer.src.zmq.zmq_server import VlaZmqServer
+from vla_infer.src.inference.server import ModelZmqInferenceServer
+
+model = VLAAdapterModel(pretrained_checkpoint="/path/to/ckpt")
+zmq_server = VlaZmqServer(port=5555)
+server = ModelZmqInferenceServer(model=model, zmq_server=zmq_server)
+server.start()
 ```
 
-### 3.2 响应字典（Server -> Client）
+### 2.3 启动机器人客户端 (Client)
 
-统一输出：
+客户端会自动捕获机器人状态与相机图像，发送给服务端并执行返回的动作块：
 
-```python
-{
-	"action": np.ndarray((T, D), dtype=np.float32)
-}
+```bash
+python example/vla-adapter/vla-adapter-piper_client.py --server_ip 127.0.0.1 --task_instruction "Pick up the banana"
 ```
 
-- `T`：动作块长度（chunk size）
-- `D`：动作维度（单臂 Piper 至少 7 维，`joint(6)+gripper(1)`）
+## 3. 协议规范
 
-## 4. 模型封装接口
+### 3.1 请求 (Observation)
+客户端发送给服务端的字典通常包含：
+- `image`: 主视角 RGB 图像 (H, W, 3)
+- `wrist_image`: 手腕视角 RGB 图像 (H, W, 3)
+- `state`: 机器人当前状态 (7维: 6轴 + 1夹爪)
+- `instruction`: 任务指令字符串
 
-所有模型遵循：
+### 3.2 响应 (Action)
+服务端返回：
+- `action`: 动作块 (T, 7)，其中 T 为 chunk size。
 
-```python
-class BaseVLAModel(ABC):
-	def load_model(self) -> None: ...
-	def predict(self, observation: dict) -> dict: ...
-```
+## 4. 特色功能
 
-### 4.1 SmolVLA
+- **图像压缩**: 自动将 `numpy` 图像转换为高质量 JPEG 流传输。
+- **动作平滑**: 客户端内置 `smooth_action_chunk` 等工具，减少机器人震动。
+- **多模型支持**: 通过统一的 `BaseVLAModel` 快速切换不同的 VLA 模型（如 OpenVLA、SmolVLA）。
+- **Piper 深度集成**: 专门针对 Piper 机械臂优化的 `PiperSingleRobot` 类，支持单臂及其双相机同步采集。
 
-```python
-from vla_infer.models import SmolVLAModel
+## 5. 项目结构详述
 
-model = SmolVLAModel(
-	model_path="/path/to/smolvla_checkpoint",
-	dataset_repo_id="miku112/piper-pick-banana-50",
-	dataset_root="/path/to/lerobot_dataset",
-	action_chunk_size=50,
-)
-```
-
-### 4.2 VLA-Adapter
-
-```python
-from vla_infer.models import VLAAdapterModel
-
-model = VLAAdapterModel(
-	model_path="/path/to/vla_adapter_checkpoint",
-	base_model_checkpoint="/path/to/openvla_base",  # 可选
-)
-```
-
-## 5. PiperSingle 机器人适配
-
-`PiperSingleRobot` 复用 `my_robot/agilex_piper_single_base.py` 中 `PiperSingle` 的控制器与相机，不额外实现 camera。
-
-```python
-from vla_infer.robots import PiperSingleRobot
-
-robot = PiperSingleRobot(auto_setup=True)
-robot.reset()
-obs = robot.get_observation()
-
-# obs 字典示例
-# {
-#   "cam_head": ...,
-#   "cam_wrist": ...,
-#   "front_image": ...,
-#   "wrist_image": ...,
-#   "state": np.ndarray(7,),
-#   "joint": np.ndarray(6,),
-#   "qpos": np.ndarray(6,),
-#   "gripper": np.ndarray(1,)
-# }
-
-robot.apply_action({"action": np.zeros((1, 7), dtype=np.float32)})
-```
-
-## 6. Server 端最小示例
-
-```python
-from vla_infer.server import VLAServer
-from vla_infer.models import SmolVLAModel
-
-model = SmolVLAModel(
-	model_path="/path/to/smolvla_checkpoint",
-	dataset_repo_id="miku112/piper-pick-banana-50",
-	dataset_root="/path/to/lerobot_dataset",
-)
-server = VLAServer(model=model, port=5555)
-server.run()
-```
-
-## 7. Client 端最小示例
-
-```python
-import numpy as np
-
-from vla_infer.client import VLAClient
-
-client = VLAClient(server_ip="127.0.0.1", port=5555, timeout_ms=2000)
-
-obs = {
-	"cam_head": np.zeros((480, 640, 3), dtype=np.uint8),
-	"cam_wrist": np.zeros((480, 640, 3), dtype=np.uint8),
-	"state": np.zeros((7,), dtype=np.float32),
-}
-
-result = client.get_action(cmd_text="pick up the banana", obs_dict=obs, jpeg_quality=80)
-print(result["action"].shape)
-client.close()
+```text
+vla_infer/
+├── src/
+│   ├── inference/  # 客户端/服务端逻辑
+│   ├── models/     # 模型适配器 (VLA-Adapter, SmolVLA)
+│   ├── robots/     # 机器人接口 (Piper)
+│   ├── zmq/        # ZMQ 通讯与图像编解码
+│   └── process/    # 图像预处理 & 动作后处理
+├── example/        # 完整运行示例
+└── tests/          # 单元测试与模型验证
 ```
