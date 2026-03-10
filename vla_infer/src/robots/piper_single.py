@@ -55,12 +55,9 @@ class PiperSingleRobot(BaseRobot):
 
     def __init__(
         self,
-        auto_setup: bool = True,
         robot_cls: t.Optional[t.Type[t.Any]] = None,
     ) -> None:
         """初始化 PiperSingle 适配器。
-
-        :param auto_setup: 是否在构造阶段自动执行 :meth:`setup`。
         :param robot_cls: 可注入的机器人实现类，用于测试或自定义替换。
          vla_infer/src/robots/piper_single.py                 为空时默认使用 ``my_robot.agilex_piper_single_base.PiperSingle``。
         """
@@ -70,9 +67,9 @@ class PiperSingleRobot(BaseRobot):
             robot_cls = PiperSingle
 
         self._robot = robot_cls()
+        self._arm_controller = self._robot.controllers.get("arm", {}).get("left_arm")
         self._is_setup = False
-        if auto_setup:
-            self.setup()
+        self.setup()
         # initial for warming uo the realsense camera
         self.get_observation()
         time.sleep(4)
@@ -214,7 +211,19 @@ class PiperSingleRobot(BaseRobot):
         joint = action[:6]
         gripper = float(action[6])
         return joint, gripper
-
+    def get_state(self) -> t.Dict[str, np.ndarray]:
+        """获取当前本体状态（关节+夹爪）。
+        
+        state = {
+            "joint": np.ndarray(6,),    # 关节位置
+            "qpos": np.ndarray(6,),     # 关节速度
+            "gripper": np.ndarray(1,),  # 夹爪开合度
+        }
+        """
+        joint = self._arm_controller.get_state().get("joint", {})
+        gripper = self._arm_controller.get_state().get("gripper", {})
+        state = np.concatenate([self._to_fixed_length_vector(joint, 6), self._to_fixed_length_vector(gripper, 1)], axis=0)
+        return {"state": state}
     def apply_action(self, action_dict: t.Dict[str, np.ndarray]) -> None:
         """将动作字典转换为 PiperSingle 控制指令并执行。"""
         joint, gripper = self._parse_action(action_dict)
