@@ -1,15 +1,22 @@
 import typing as t
-import torch
 import numpy as np
 from .base import BaseVLAModel
 from dataclasses import dataclass
 from pathlib import Path
+
+get_reconstruct_images: t.Optional[t.Callable[..., t.Any]] = None
+
 try:
     from experiments.robot.openvla_utils import (
         get_action_head,
         get_processor,
         get_proprio_projector,
-        get_reconstruct_images,
+    )
+    from experiments.robot import openvla_utils as _openvla_utils
+
+    get_reconstruct_images = t.cast(
+        t.Optional[t.Callable[..., t.Any]],
+        getattr(_openvla_utils, "get_reconstruct_images", None),
     )
     from experiments.robot.robot_utils import get_model,get_action
 except Exception as exc:
@@ -175,7 +182,18 @@ class DreamAdapterModel(BaseVLAModel):
             self.check_unnorm_key(self._model)
 
         if self.cfg.use_reconstruct_images:
-            self._reconstruct_images = get_reconstruct_images(self.cfg, self._model.llm_dim, image_dim=588, predict_image_frame=self.cfg.predict_image_frame)
+            if get_reconstruct_images is None:
+                raise ImportError(
+                    "`get_reconstruct_images` is not available in the current "
+                    "VLA-Adapter repo version. Set use_reconstruct_images=False "
+                    "or upgrade experiments.robot.openvla_utils."
+                )
+            self._reconstruct_images = get_reconstruct_images(
+                self.cfg,
+                self._model.llm_dim,
+                image_dim=588,
+                predict_image_frame=self.cfg.predict_image_frame,
+            )
     
         self._get_vla_action = get_action
 
