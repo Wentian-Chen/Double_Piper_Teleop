@@ -35,7 +35,6 @@ class InferenceConfig:
 	timeout_ms: int = 2000
 	jpeg_quality: int = 80
 
-	auto_setup: bool = True
 	task_instruction: str = "Pick up the banana and place it in the container"
 	max_steps: int = 1000
 	stop_on_timeout: bool = True
@@ -70,8 +69,8 @@ class PiperVLAClient(InferenceClient):
 			format="%(asctime)s - %(levelname)s - %(message)s",
 		)
 
-		self.robot = robot if robot is not None else PiperSingleRobot(auto_setup=cfg.auto_setup)
-		self.robot.setup()  # Ensure robot is ready before connecting to server
+		self.robot = robot if robot is not None else PiperSingleRobot()
+		self.robot.reset()  # Ensure robot is ready before connecting to server
 		self.zmq_client = (
 			client
 			if client is not None
@@ -119,10 +118,10 @@ class PiperVLAClient(InferenceClient):
 		# response = {"action": np.ndarray(T, D), ...}
 		action = self.zmq_client.get_response(obs_dict=observation)["action"]
 		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
-		abs_action = delta_action_chunk_to_absolute(self.obs["state"],action)
+		abs_action = action
+		# abs_action = delta_action_chunk_to_absolute(self.obs["state"],action)
 		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
 		return {"action": smooth_action}
-
 
 	def execute(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
 		"""execute action chunk on robot."""
@@ -138,7 +137,8 @@ class PiperVLAClient(InferenceClient):
 		execute_steps = min(max(1, self.cfg.execute_chunk_steps), action_2d.shape[0])
 
 		for idx in range(execute_steps):
-			self.robot.apply_action({"action": action_2d[idx]})
+			#  self.robot.get_state()["state"] 
+			self.robot.apply_action({"action":action_2d[idx]})
 			if self.cfg.control_interval_s > 0:
 				time.sleep(self.cfg.control_interval_s)
 
