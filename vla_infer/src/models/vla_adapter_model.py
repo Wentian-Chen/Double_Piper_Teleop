@@ -1,5 +1,4 @@
 import typing as t
-import torch
 import numpy as np
 from .base import BaseVLAModel
 from dataclasses import dataclass
@@ -9,17 +8,16 @@ try:
         get_action_head,
         get_processor,
         get_proprio_projector,
-        get_reconstruct_images,
     )
     from experiments.robot.robot_utils import get_model,get_action
 except Exception as exc:
     raise ImportError(
         "Failed to import VLA-Adapter modules. Please add the VLA-Adapter repo root "
-        "to sys.path before creating VLAAdapterModel."
+        "to sys.path before creating VlaAdapterModel."
     ) from exc
     
 @dataclass
-class VLAAdapterModelConfig:
+class VlaAdapterModelConfig:
     pretrained_checkpoint: t.Union[str, Path] = ""
     model_family: str = "openvla"
     use_l1_regression: bool = True
@@ -34,10 +32,9 @@ class VLAAdapterModelConfig:
     save_version: str = "vla-adapter"
     unnorm_key: str = ""
     use_film: bool = False
-    use_reconstruct_images: bool = True
     center_crop: bool = False
-    predict_image_frame: int = 1
-class VLAAdapterModel(BaseVLAModel):
+    proprio_dim: int = 7
+class VlaAdapterModel(BaseVLAModel):
     """VLA-Adapter server-side wrapper aligned with official Dream-Adapter inference.
 
     Expected observation format::
@@ -72,11 +69,9 @@ class VLAAdapterModel(BaseVLAModel):
         save_version: str = "vla-adapter",
         use_film: bool = False,
         proprio_dim : int = 7,
-        use_reconstruct_images: bool = True,
-        default_instruction: str = "",
-        predict_image_frame: int = 1       
+        default_instruction: str = "",   
     ) -> None:
-        self.cfg = VLAAdapterModelConfig(
+        self.cfg = VlaAdapterModelConfig(
             pretrained_checkpoint=pretrained_checkpoint,
             model_family=model_family,
             use_l1_regression=use_l1_regression,
@@ -89,16 +84,14 @@ class VLAAdapterModel(BaseVLAModel):
             load_in_4bit=load_in_4bit,
             save_version=save_version,
             task_suite_name=task_suite_name,
-            use_reconstruct_images=use_reconstruct_images,
+            proprio_dim=proprio_dim,
             use_film=use_film,
-            predict_image_frame=predict_image_frame
         )
         self._model: t.Any = None
         self._action_head: t.Any = None
         self._proprio_projector: t.Any = None
         self._processor: t.Any = None
         self._get_vla_action: t.Any = None
-        self._reconstruct_images: t.Any = None
         self._proprio_dim: int = proprio_dim
         self._default_instruction = default_instruction
         super().__init__()
@@ -119,19 +112,6 @@ class VLAAdapterModel(BaseVLAModel):
         if state.shape[0] != proprio_dim:
             raise ValueError(f"state must be shape ({proprio_dim},), got {state.shape}")
         return state
-
-    @staticmethod
-    def _state_7d_to_8d(state_7d: np.ndarray) -> np.ndarray:
-        return np.concatenate([state_7d[:6], np.zeros(1, dtype=np.float32), state_7d[6:]], axis=0)
-
-    def _format_state_for_model(self, state_7d: np.ndarray) -> np.ndarray:
-        """Adapt canonical 7D state to model-configured proprio dimension."""
-        if self._proprio_dim == 7:
-            return state_7d
-        if self._proprio_dim == 8:
-            return self._state_7d_to_8d(state_7d)
-        raise ValueError(f"Unsupported proprio_dim={self._proprio_dim}. Expected 7 or 8.")
-
     @staticmethod
     def _to_action_array(action: t.Any) -> np.ndarray:
         action_np = np.asarray(action, dtype=np.float32)
@@ -148,11 +128,11 @@ class VLAAdapterModel(BaseVLAModel):
             raise RuntimeError("VLAAdapterModel is not initialized. Call load_model first.")
 
     @staticmethod
-    def _resolve_llm_dim(model: t.Any) -> t.Optional[int]:
+    def _resolve_llm_dim(model: t.Any) -> int:
         llm_dim = getattr(model, "llm_dim", None)
         if isinstance(llm_dim, int):
             return llm_dim
-        return None 
+        raise ValueError("Failed to resolve LLM dimension.")
     def check_unnorm_key(self, model) -> None:
         """Check that the model contains the action un-normalization key."""
         # Initialize unnorm_key
@@ -184,10 +164,7 @@ class VLAAdapterModel(BaseVLAModel):
             self._processor = get_processor(self.cfg)
             self.check_unnorm_key(self._model)
 
-        if self.cfg.use_reconstruct_images:
-            self._reconstruct_images = get_reconstruct_images(self.cfg, self._model.llm_dim, image_dim=588, predict_image_frame=self.cfg.predict_image_frame)
-    
-            self._get_vla_action = get_action
+        self._get_vla_action = get_action
 
     def _predict_action_chunk_array(self, observation: t.Dict[str, t.Any]) -> np.ndarray:
         self._ensure_loaded()
@@ -202,7 +179,7 @@ class VLAAdapterModel(BaseVLAModel):
             "image_wrist": wrist_image,
         }
         if self.cfg.use_proprio:
-            policy_obs["state"] = self._format_state_for_model(state_7d)
+            policy_obs["state"] = state_7d
 
         pred_actions = self._get_vla_action(
             cfg=self.cfg,
@@ -212,7 +189,6 @@ class VLAAdapterModel(BaseVLAModel):
             task_label=cmd,
             action_head=self._action_head,
             proprio_projector=self._proprio_projector,
-            reconstruct_images=self._reconstruct_images,
             use_film=self.cfg.use_film,
             use_minivlm=self.cfg.use_minivlm,
         )

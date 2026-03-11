@@ -7,7 +7,7 @@ import typing as t
 import draccus
 
 from vla_infer.src.inference.server import ModelZmqInferenceServer
-from vla_infer.src.models import VLAAdapterModel
+from vla_infer.src.models.vla_adapter_model import VlaAdapterModel
 from vla_infer.src.zmq.zmq_server import VlaZmqServer
 
 draccus_wrap = t.cast(t.Callable[..., t.Callable[..., t.Any]], getattr(draccus, "wrap"))
@@ -15,7 +15,7 @@ draccus_wrap = t.cast(t.Callable[..., t.Callable[..., t.Any]], getattr(draccus, 
 
 
 @dataclass
-class VLAAdapterServerConfig:
+class VlaAdapterServerConfig:
     """Runtime config for launching VLA-Adapter inference server."""
     # VLA-Adapter checkpoint directory.
     model_path: str = ""
@@ -47,10 +47,12 @@ class VLAAdapterServerConfig:
     port: int = 5555
     jpeg_quality: int = 80
     log_level: str = "INFO"
-
+    default_instruction: str = ""
+    # use to change the default constant
+    proprio_dim: int = 7
 
 @draccus_wrap()
-def main(cfg: VLAAdapterServerConfig) -> None:
+def main(cfg: VlaAdapterServerConfig) -> None:
     logging.basicConfig(
         level=getattr(logging, cfg.log_level.upper(), logging.INFO),
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -58,7 +60,7 @@ def main(cfg: VLAAdapterServerConfig) -> None:
     logging.info("Starting VLA-Adapter server on tcp://%s:%s", cfg.ip, cfg.port)
 
     zmq_server = VlaZmqServer(ip=cfg.ip, port=cfg.port, jpeg_quality=cfg.jpeg_quality)
-    model = VLAAdapterModel(
+    model = VlaAdapterModel(
         pretrained_checkpoint=cfg.model_path,
         model_family=cfg.model_family,
         use_l1_regression=cfg.use_l1_regression,
@@ -72,6 +74,8 @@ def main(cfg: VLAAdapterServerConfig) -> None:
         num_open_loop_steps=cfg.num_open_loop_steps,
         save_version=cfg.save_version,
         task_suite_name=cfg.task_suite_name,
+        default_instruction=cfg.default_instruction,
+        proprio_dim=cfg.proprio_dim,
     )
 
     server = ModelZmqInferenceServer(model=model, zmq_server=zmq_server)

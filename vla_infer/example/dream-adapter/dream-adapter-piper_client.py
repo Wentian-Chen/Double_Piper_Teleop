@@ -35,7 +35,7 @@ class InferenceConfig:
 	timeout_ms: int = 2000
 	jpeg_quality: int = 80
 
-	task_instruction: str = "Pick up the banana and place it in the container"
+	task_instruction: str = "Pick up the banana and place it in the bowl"
 	max_steps: int = 1000
 	stop_on_timeout: bool = True
 
@@ -70,7 +70,8 @@ class PiperVLAClient(InferenceClient):
 		)
 
 		self.robot = robot if robot is not None else PiperSingleRobot()
-		# self.robot.reset()  # Ensure robot is ready before connecting to server
+		self.robot.reset()
+		time.sleep(4)
 		self.zmq_client = (
 			client
 			if client is not None
@@ -91,13 +92,13 @@ class PiperVLAClient(InferenceClient):
 			"image": raw_obs.get("cam_head"),
 			"wrist_image": raw_obs.get("cam_wrist"),
 		}
-		
+		# # adaptive resize image
 		obs["image"] = check_uint8_rgb(adaptive_resize_image(obs["image"]))
 		obs["wrist_image"] = check_uint8_rgb(adaptive_resize_image(obs["wrist_image"]))
 		# Ensure images are HWC3 uint8 before resize to satisfy model input contract.
 		# obs["image"] = ensure_hwc3_uint8_image(np.asarray(obs["image"]))
 		# obs["wrist_image"] = ensure_hwc3_uint8_image(np.asarray(obs["wrist_image"]))
-		# # adaptive resize image
+		
 		self.obs = obs # save for later use in get_response
 		return obs
 
@@ -111,28 +112,30 @@ class PiperVLAClient(InferenceClient):
 		for key, value in observation.items():
 			if value is not None and hasattr(value, "shape") and hasattr(value, "dtype"):
 				logging.debug(f"Observation '{key}' shape={value.shape} dtype={value.dtype}")
+
     	# set cmd to task_instruction if provided, otherwise use default from config
 		observation["cmd"] = task_instruction or self.cfg.task_instruction
 		logging.debug(f"Observation 'cmd'='{observation['cmd']}'")
+
 		# send observation to server and get response
 		# response = {"action": np.ndarray(T, D), ...}
 		action = self.zmq_client.get_response(obs_dict=observation)["action"]
-		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
-		# abs_action = action
-		abs_action = delta_action_chunk_to_absolute(self.obs["state"],action)
-		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
-		return {"action": smooth_action}
+		return {"action": action}
 
 	def execute(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
 		"""execute action chunk on robot."""
+		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
 		action = np.asarray(response["action"], dtype=np.float32)
+		abs_action = delta_action_chunk_to_absolute(self.obs["state"],action)
+		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+
 		# ensure action is 2D (T, D)
-		if action.ndim == 1:
-			action_2d = action[None, :]
-		elif action.ndim == 2:
-			action_2d = action
+		if smooth_action.ndim == 1:
+			action_2d = smooth_action[None, :]
+		elif smooth_action.ndim == 2:
+			action_2d = smooth_action
 		else:
-			raise ValueError(f"action must be 1D or 2D, got shape={action.shape}")
+			raise ValueError(f"action must be 1D or 2D, got shape={smooth_action.shape}")
 
 		execute_steps = min(max(1, self.cfg.execute_chunk_steps), action_2d.shape[0])
 
