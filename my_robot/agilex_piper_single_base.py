@@ -31,7 +31,6 @@ START_POSITION_ANGLE_LEFT_ARM = [
     0.78588684,  # Joint 5
     -0.05256932,    # Joint 6
 ]
-
 # Define start position (in degrees)
 START_POSITION_ANGLE_RIGHT_ARM = [
     0,   # Joint 1

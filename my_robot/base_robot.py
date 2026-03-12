@@ -10,11 +10,11 @@ import h5py
 
 from controller.TestArm_controller import TestArmController
 from sensor.TestVision_sensor import TestVisonSensor
-
+from sensor.SensorVisualizer import SensorVisualizer
 from data.collect_any import CollectAny
 
 from utils.data_handler import debug_print, hdf5_groups_to_dict
-
+from PIL import Image, ImageDraw, ImageFont
 import cv2
 
 # add your controller/sensor type here
@@ -26,6 +26,7 @@ condition = {
     "save_format": "hdf5", 
     "save_freq": 10,
 }
+
 
 class Robot:
     def __init__(self, 
@@ -39,6 +40,7 @@ class Robot:
 
         self.condition = condition
         self.collection = CollectAny(condition, move_check=move_check, start_episode=start_episode)
+        self.visualizer = SensorVisualizer(figsize=(12, 6))
 
     def set_up(self):
         for controller_type in self.controllers.keys():
@@ -62,7 +64,10 @@ class Robot:
                 for sensor in self.sensors[key].values():
                     sensor.set_collect_info(value)
     
-    def get(self):
+    def visualize_sensor_data(self,sensor_data):
+        return self.visualizer.visualize(sensor_data)
+    
+    def get(self,show_image=False):
         controller_data = {}
         sensor_data = {}
 
@@ -75,6 +80,9 @@ class Robot:
             for type_name, sensor_type in self.sensors.items(): 
                 for sensor_name, sensor in sensor_type.items():
                     sensor_data[sensor_name] = sensor.get()
+
+        if show_image and sensor_data:
+           self.visualize_sensor_data(sensor_data)
 
         return [controller_data, sensor_data]
     

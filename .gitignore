@@ -4,6 +4,7 @@
 # Ignore __pycache__ directory
 __pycache__/
 .pytest_cache
+.vscode/
 # Ignore other Python cache files
 *.pyo
 *.pyd
