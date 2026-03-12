@@ -44,6 +44,9 @@ class InferenceConfig:
 	control_interval_s: float = 0.04
 	log_level: str = "INFO"
 
+	state_type: str = "qpos"
+	action_type: str = "joint"
+
 
 class PiperVLAClient(InferenceClient):
 	"""Client runtime that bridges PiperSingleRobot and VLA server.
@@ -70,8 +73,9 @@ class PiperVLAClient(InferenceClient):
 		)
 
 		self.robot = robot if robot is not None else PiperSingleRobot()
+		time.sleep(2)
 		self.robot.reset()
-		time.sleep(4)
+		time.sleep(2)
 		self.zmq_client = (
 			client
 			if client is not None
@@ -87,8 +91,16 @@ class PiperVLAClient(InferenceClient):
 	def get_observation(self) -> t.Dict[str, t.Any]:
 		"""Abstract step 1: collect and preprocess one observation payload."""
 		raw_obs = self.robot.get_observation()
+		# set state as qpos
+		if self.cfg.state_type == "qpos":
+			qpos_value = raw_obs.get("qpos",np.zeros(6,dtype=np.float32))
+			gripper_value = np.asarray([raw_obs.get("gripper", 0.0)], dtype=np.float32)
+			state = np.concatenate([qpos_value, gripper_value], axis=0)
+		elif self.cfg.state_type == "joint":
+			state = raw_obs.get("joint", np.zeros(7, dtype=np.float32))
+
 		obs = {
-			"state": raw_obs.get("state", np.zeros(7, dtype=np.float32)),
+			"state": state,
 			"image": raw_obs.get("cam_head"),
 			"wrist_image": raw_obs.get("cam_wrist"),
 		}
@@ -99,7 +111,10 @@ class PiperVLAClient(InferenceClient):
 		# obs["image"] = ensure_hwc3_uint8_image(np.asarray(obs["image"]))
 		# obs["wrist_image"] = ensure_hwc3_uint8_image(np.asarray(obs["wrist_image"]))
 		
-		self.obs = obs # save for later use in get_response
+		self.obs = obs # save for later use in execute
+		if self.cfg.action_type == "joint" and self.cfg.state_type == "qpos":
+			self.obs["joint_state"] = state # save joint state for later use in absolute conversion
+
 		return obs
 
 	def get_response(
@@ -126,7 +141,11 @@ class PiperVLAClient(InferenceClient):
 		"""execute action chunk on robot."""
 		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
 		action = np.asarray(response["action"], dtype=np.float32)
-		abs_action = delta_action_chunk_to_absolute(self.obs["state"],action)
+		if self.cfg.state_type == "qpos":
+			abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
+		else:
+			abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
+
 		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
 
 		# ensure action is 2D (T, D)

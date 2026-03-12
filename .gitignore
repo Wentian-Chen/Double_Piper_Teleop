@@ -15,7 +15,7 @@ build/
 datasets/
 save/
 datasets_rlds/
-
+.vscode/
 # example/teleop
 test/*
 tests/*
