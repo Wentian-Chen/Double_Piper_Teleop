@@ -7,7 +7,7 @@ import typing as t
 import draccus
 
 from vla_infer.src.inference.server import ModelZmqInferenceServer
-from vla_infer.src.models.vla_adapter_model import VlaAdapterModel
+from vla_infer.src.models import DreamAdapterModel
 from vla_infer.src.zmq.zmq_server import VlaZmqServer
 
 draccus_wrap = t.cast(t.Callable[..., t.Callable[..., t.Any]], getattr(draccus, "wrap"))
@@ -15,9 +15,9 @@ draccus_wrap = t.cast(t.Callable[..., t.Callable[..., t.Any]], getattr(draccus, 
 
 
 @dataclass
-class VlaAdapterServerConfig:
-    """Runtime config for launching VLA-Adapter inference server."""
-    # VLA-Adapter checkpoint directory.
+class DreamAdapterServerConfig:
+    """Runtime config for launching Dream-Adapter inference server."""
+    # Dream-Adapter checkpoint directory.
     model_path: str = ""
     # Model family (must be openvla).
     model_family: str = "openvla"
@@ -47,20 +47,21 @@ class VlaAdapterServerConfig:
     port: int = 5555
     jpeg_quality: int = 80
     log_level: str = "INFO"
+    use_reconstruct_images: bool = True
+    predict_image_frame: int = 1
     default_instruction: str = ""
-    # use to change the default constant
     proprio_dim: int = 7
 
 @draccus_wrap()
-def main(cfg: VlaAdapterServerConfig) -> None:
+def main(cfg: DreamAdapterServerConfig) -> None:
     logging.basicConfig(
         level=getattr(logging, cfg.log_level.upper(), logging.INFO),
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
-    logging.info("Starting VLA-Adapter server on tcp://%s:%s", cfg.ip, cfg.port)
+    logging.info("Starting Dream-Adapter server on tcp://%s:%s", cfg.ip, cfg.port)
 
     zmq_server = VlaZmqServer(ip=cfg.ip, port=cfg.port, jpeg_quality=cfg.jpeg_quality)
-    model = VlaAdapterModel(
+    model = DreamAdapterModel(
         pretrained_checkpoint=cfg.model_path,
         model_family=cfg.model_family,
         use_l1_regression=cfg.use_l1_regression,
@@ -74,7 +75,9 @@ def main(cfg: VlaAdapterServerConfig) -> None:
         num_open_loop_steps=cfg.num_open_loop_steps,
         save_version=cfg.save_version,
         task_suite_name=cfg.task_suite_name,
+        use_reconstruct_images=cfg.use_reconstruct_images,
         default_instruction=cfg.default_instruction,
+        predict_image_frame=cfg.predict_image_frame,
         proprio_dim=cfg.proprio_dim,
     )
 

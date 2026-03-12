@@ -44,8 +44,6 @@ class InferenceConfig:
 	control_interval_s: float = 0.04
 	log_level: str = "INFO"
 
-	control_mode: str = "modeJ"
-
 
 class PiperVLAClient(InferenceClient):
 	"""Client runtime that bridges PiperSingleRobot and VLA server.
@@ -72,9 +70,8 @@ class PiperVLAClient(InferenceClient):
 		)
 
 		self.robot = robot if robot is not None else PiperSingleRobot()
-		time.sleep(2)
-		self.robot.reset()  # Ensure robot is ready before connecting to server
-		
+		self.robot.reset()
+		time.sleep(4)
 		self.zmq_client = (
 			client
 			if client is not None
@@ -90,22 +87,17 @@ class PiperVLAClient(InferenceClient):
 	def get_observation(self) -> t.Dict[str, t.Any]:
 		"""Abstract step 1: collect and preprocess one observation payload."""
 		raw_obs = self.robot.get_observation()
-
-		if self.cfg.control_mode == "modeP":
-			state = raw_obs.get("qpos", np.zeros(6, dtype=np.float32))
-		elif self.cfg.control_mode == "modeJ":	
-			# raw_obs["state"] = [joint(6), gripper(1)]
-			state = raw_obs.get("state", np.zeros(7, dtype=np.float32))
-		
 		obs = {
-			"state": state,
+			"state": raw_obs.get("state", np.zeros(7, dtype=np.float32)),
 			"image": raw_obs.get("cam_head"),
 			"wrist_image": raw_obs.get("cam_wrist"),
 		}
-
-		# Ensure images are HWC3 uint8 before resize to satisfy model input contract.
+		# # adaptive resize image
 		obs["image"] = check_uint8_rgb(adaptive_resize_image(obs["image"]))
 		obs["wrist_image"] = check_uint8_rgb(adaptive_resize_image(obs["wrist_image"]))
+		# Ensure images are HWC3 uint8 before resize to satisfy model input contract.
+		# obs["image"] = ensure_hwc3_uint8_image(np.asarray(obs["image"]))
+		# obs["wrist_image"] = ensure_hwc3_uint8_image(np.asarray(obs["wrist_image"]))
 		
 		self.obs = obs # save for later use in get_response
 		return obs
@@ -120,6 +112,7 @@ class PiperVLAClient(InferenceClient):
 		for key, value in observation.items():
 			if value is not None and hasattr(value, "shape") and hasattr(value, "dtype"):
 				logging.debug(f"Observation '{key}' shape={value.shape} dtype={value.dtype}")
+
     	# set cmd to task_instruction if provided, otherwise use default from config
 		observation["cmd"] = task_instruction or self.cfg.task_instruction
 		logging.debug(f"Observation 'cmd'='{observation['cmd']}'")
@@ -127,7 +120,6 @@ class PiperVLAClient(InferenceClient):
 		# send observation to server and get response
 		# response = {"action": np.ndarray(T, D), ...}
 		action = self.zmq_client.get_response(obs_dict=observation)["action"]
-		
 		return {"action": action}
 
 	def execute(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
@@ -135,11 +127,7 @@ class PiperVLAClient(InferenceClient):
 		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
 		action = np.asarray(response["action"], dtype=np.float32)
 		abs_action = delta_action_chunk_to_absolute(self.obs["state"],action)
-		
-		if self.cfg.control_mode == "modeP":
-			smooth_action = abs_action
-		elif self.cfg.control_mode == "modeJ":
-			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
 
 		# ensure action is 2D (T, D)
 		if smooth_action.ndim == 1:

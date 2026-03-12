@@ -72,7 +72,7 @@ class PiperSingleRobot(BaseRobot):
         self.setup()
         # initial for warming uo the realsense camera
         self.get_observation()
-        time.sleep(4)
+        time.sleep(2)
 
     def setup(self) -> None:
         """初始化机器人连接与采集项。"""

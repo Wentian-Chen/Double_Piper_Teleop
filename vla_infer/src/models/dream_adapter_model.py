@@ -3,21 +3,30 @@ import numpy as np
 from .base import BaseVLAModel
 from dataclasses import dataclass
 from pathlib import Path
+
+get_reconstruct_images: t.Optional[t.Callable[..., t.Any]] = None
+
 try:
     from experiments.robot.openvla_utils import (
         get_action_head,
         get_processor,
         get_proprio_projector,
     )
+    from experiments.robot import openvla_utils as _openvla_utils
+
+    get_reconstruct_images = t.cast(
+        t.Optional[t.Callable[..., t.Any]],
+        getattr(_openvla_utils, "get_reconstruct_images", None),
+    )
     from experiments.robot.robot_utils import get_model,get_action
 except Exception as exc:
     raise ImportError(
         "Failed to import VLA-Adapter modules. Please add the VLA-Adapter repo root "
-        "to sys.path before creating VlaAdapterModel."
+        "to sys.path before creating VLAAdapterModel."
     ) from exc
     
 @dataclass
-class VlaAdapterModelConfig:
+class DreamAdapterModelConfig:
     pretrained_checkpoint: t.Union[str, Path] = ""
     model_family: str = "openvla"
     use_l1_regression: bool = True
@@ -32,10 +41,12 @@ class VlaAdapterModelConfig:
     save_version: str = "vla-adapter"
     unnorm_key: str = ""
     use_film: bool = False
+    use_reconstruct_images: bool = True
     center_crop: bool = False
+    predict_image_frame: int = 1
     proprio_dim: int = 7
-class VlaAdapterModel(BaseVLAModel):
-    """VLA-Adapter server-side wrapper aligned with official Dream-Adapter inference.
+class DreamAdapterModel(BaseVLAModel):
+    """Dream-Adapter server-side wrapper aligned with official Dream-Adapter inference.
 
     Expected observation format::
 
@@ -69,9 +80,11 @@ class VlaAdapterModel(BaseVLAModel):
         save_version: str = "vla-adapter",
         use_film: bool = False,
         proprio_dim : int = 7,
-        default_instruction: str = "",   
+        use_reconstruct_images: bool = True,
+        default_instruction: str = "",
+        predict_image_frame: int = 1       
     ) -> None:
-        self.cfg = VlaAdapterModelConfig(
+        self.cfg = DreamAdapterModelConfig(
             pretrained_checkpoint=pretrained_checkpoint,
             model_family=model_family,
             use_l1_regression=use_l1_regression,
@@ -85,13 +98,16 @@ class VlaAdapterModel(BaseVLAModel):
             save_version=save_version,
             task_suite_name=task_suite_name,
             proprio_dim=proprio_dim,
+            use_reconstruct_images=use_reconstruct_images,
             use_film=use_film,
+            predict_image_frame=predict_image_frame
         )
         self._model: t.Any = None
         self._action_head: t.Any = None
         self._proprio_projector: t.Any = None
         self._processor: t.Any = None
         self._get_vla_action: t.Any = None
+        self._reconstruct_images: t.Any = None
         self._proprio_dim: int = proprio_dim
         self._default_instruction = default_instruction
         super().__init__()
@@ -112,6 +128,7 @@ class VlaAdapterModel(BaseVLAModel):
         if state.shape[0] != proprio_dim:
             raise ValueError(f"state must be shape ({proprio_dim},), got {state.shape}")
         return state
+
     @staticmethod
     def _to_action_array(action: t.Any) -> np.ndarray:
         action_np = np.asarray(action, dtype=np.float32)
@@ -164,6 +181,20 @@ class VlaAdapterModel(BaseVLAModel):
             self._processor = get_processor(self.cfg)
             self.check_unnorm_key(self._model)
 
+        if self.cfg.use_reconstruct_images:
+            if get_reconstruct_images is None:
+                raise ImportError(
+                    "`get_reconstruct_images` is not available in the current "
+                    "VLA-Adapter repo version. Set use_reconstruct_images=False "
+                    "or upgrade experiments.robot.openvla_utils."
+                )
+            self._reconstruct_images = get_reconstruct_images(
+                self.cfg,
+                self._model.llm_dim,
+                image_dim=588,
+                predict_image_frame=self.cfg.predict_image_frame,
+            )
+    
         self._get_vla_action = get_action
 
     def _predict_action_chunk_array(self, observation: t.Dict[str, t.Any]) -> np.ndarray:
@@ -180,7 +211,7 @@ class VlaAdapterModel(BaseVLAModel):
         }
         if self.cfg.use_proprio:
             policy_obs["state"] = state_7d
-
+            
         pred_actions = self._get_vla_action(
             cfg=self.cfg,
             model=self._model,
@@ -189,6 +220,7 @@ class VlaAdapterModel(BaseVLAModel):
             task_label=cmd,
             action_head=self._action_head,
             proprio_projector=self._proprio_projector,
+            reconstruct_images=self._reconstruct_images,
             use_film=self.cfg.use_film,
             use_minivlm=self.cfg.use_minivlm,
         )

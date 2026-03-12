@@ -9,12 +9,13 @@ description = "VLA inference client/server framework for robot deployment"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "numpy>=1.24",
+  "numpy>=1.24,<2",
   "Pillow>=10.0",
   "msgpack>=1.0",
   "msgpack-numpy>=0.4.8",
   "pyzmq>=25.0",
   "draccus>=0.8",
+  "omegaconf"
 ]
 
 [project.optional-dependencies]
