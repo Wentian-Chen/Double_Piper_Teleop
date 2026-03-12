@@ -8,29 +8,24 @@ from enum import IntEnum
 from typing import Any, Dict, Optional, Tuple
 import draccus
 import numpy as np
-
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ['WANDB_MODE'] = 'offline'
+os.environ['NCCL_P2P_DISABLE'] = '1'
+os.environ['NCCL_IB_DISABLE'] = '1'
 # ====== Path Setup ======
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 DOUBLE_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../.."))
 REPO_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../.."))
 VLA_ROOT = os.path.join(REPO_ROOT, "VLA-Adapter")
-
+VLA_ROOT = '/media/lxx/Elements/project/Dream-adapter'
 sys.path.insert(0, DOUBLE_ROOT)
 sys.path.insert(0, VLA_ROOT)
 
 from my_robot.agilex_piper_single_base import PiperSingle
 from utils.data_handler import is_enter_pressed
 
-from experiments.robot.openvla_utils import (
-    get_action_head,
-    get_processor,
-    get_proprio_projector,
-)
-from experiments.robot.robot_utils import (
-    get_model,
-    get_action,
-    set_seed_everywhere
-)
+from experiments.robot.openvla_utils import get_action_head,get_processor,get_proprio_projector
+from experiments.robot.robot_utils import get_model,get_action,set_seed_everywhere
 
 
 @dataclass
@@ -53,7 +48,7 @@ class DeployConfig:
     use_minivlm: bool = True
     use_pro_version: bool = True
     use_film: bool = False
-
+    use_action_fues_image: bool = False
     # Quantization
     load_in_8bit: bool = False
     load_in_4bit: bool = False
@@ -128,7 +123,7 @@ def action_to_move(
     if action.shape[-1] < 7:
         raise ValueError(f"Expected action dim=7, got {action.shape[-1]}")
 
-    delta_pos = clamp(action[:3], -max_delta_pos, max_delta_pos)
+    delta_pos = clamp(action[:3], -max_delta_pos, max_delta_pos) # 限制，防止超出范围
     delta_rpy = clamp(action[3:6], -max_delta_rpy, max_delta_rpy)
 
     target_qpos = current_qpos.copy()
@@ -154,6 +149,14 @@ def action_to_move(
         }
     }
 
+def format_floats(obj):
+    if isinstance(obj, float):
+        return f"{obj:.3f}"
+    elif isinstance(obj, list):
+        return [format_floats(x) for x in obj]
+    elif isinstance(obj, dict):
+        return {k: format_floats(v) for k, v in obj.items()}
+    return obj
 
 def ensure_unnorm_key(model: Any, cfg: DeployConfig) -> None:
     if not hasattr(model, "norm_stats"):
@@ -219,7 +222,7 @@ def main(cfg: DeployConfig):
     stall_max_steps = 5
     stalled = False
     while step < max_steps:
-        data = robot.get()
+        data = robot.get(show_image=False)
         controller_data, sensor_data = data[0], data[1]
 
         proprio = build_proprio(controller_data)
@@ -266,7 +269,9 @@ def main(cfg: DeployConfig):
                 lock_ry=cfg.lock_ry,
                 rpy_delta_scale=cfg.rpy_delta_scale,
             )
-            print(f"Step {step}: Move Data: {move_data}")
+
+            formatted = format_floats(move_data)
+            print(f"Step {step}: Move Data: {json.dumps(formatted, ensure_ascii=False)}")
 
             robot.move_modeP(move_data["arm"]["left_arm"]["qpos"], move_data["arm"]["left_arm"]["gripper"])
             step += 1
