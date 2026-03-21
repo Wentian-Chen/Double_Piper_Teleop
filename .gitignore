@@ -12,6 +12,7 @@ __pycache__/
 脚本.txt
 build/
 *.egg-info/
+openloop_eval_plots_joint/
 # datasets
 datasets/
 save/

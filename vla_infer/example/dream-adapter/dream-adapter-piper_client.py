@@ -45,7 +45,12 @@ class InferenceConfig:
 	log_level: str = "INFO"
 
 	state_type: str = "qpos"
-	action_type: str = "joint"
+	action_type: str = "joint"	
+	
+	enable_binary_gripper: bool = False
+	binary_gripper_threshold: float = 0.4
+	gripper_open_value: float = 0.6
+	gripper_closed_value: float = 0.2
 
 
 class PiperVLAClient(InferenceClient):
@@ -87,7 +92,6 @@ class PiperVLAClient(InferenceClient):
 		)
 		self.obs: t.Dict[str, t.Any] = {}
   
-
 	def get_observation(self) -> t.Dict[str, t.Any]:
 		"""Abstract step 1: collect and preprocess one observation payload."""
 		raw_obs = self.robot.get_observation()
@@ -97,7 +101,7 @@ class PiperVLAClient(InferenceClient):
 			gripper_value = np.asarray([raw_obs.get("gripper", 0.0)], dtype=np.float32)
 			state = np.concatenate([qpos_value, gripper_value], axis=0)
 		elif self.cfg.state_type == "joint":
-			state = raw_obs.get("joint", np.zeros(7, dtype=np.float32))
+			state = raw_obs.get("state", np.zeros(7, dtype=np.float32))
 
 		obs = {
 			"state": state,
@@ -110,10 +114,15 @@ class PiperVLAClient(InferenceClient):
 		# Ensure images are HWC3 uint8 before resize to satisfy model input contract.
 		# obs["image"] = ensure_hwc3_uint8_image(np.asarray(obs["image"]))
 		# obs["wrist_image"] = ensure_hwc3_uint8_image(np.asarray(obs["wrist_image"]))
-		
+  
+		# binary gripper state (open/close) for discrete action models, determined by thresholding the last element of state vector (gripper position)
+		if self.cfg.enable_binary_gripper:
+			obs["state"][-1] = 1.0 if obs["state"][-1] > self.cfg.binary_gripper_threshold else 0.0
+   
 		self.obs = obs # save for later use in execute
 		if self.cfg.action_type == "joint" and self.cfg.state_type == "qpos":
-			self.obs["joint_state"] = state # save joint state for later use in absolute conversion
+			self.obs["joint_state"] = raw_obs.get("state", np.zeros(7, dtype=np.float32)) # save joint state for later use in absolute conversion
+		
 
 		return obs
 
@@ -141,14 +150,30 @@ class PiperVLAClient(InferenceClient):
 		"""execute action chunk on robot."""
 		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
 		action = np.asarray(response["action"], dtype=np.float32)
-		if self.cfg.state_type == "qpos":
-			abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
+		# normal absolute + smoothing
+		if not self.cfg.enable_binary_gripper:
+			if self.cfg.state_type == "qpos":
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
+			else:
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
+
+			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+			action = smooth_action
+		# binary gripper
 		else:
-			abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
+			if self.cfg.state_type == "qpos":
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32))[:6], action[:, :6]) # only convert the first 6 dimensions for absolute, keep gripper as is
+			else:
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32))[:6], action[:, :6])
+			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+			smooth_action = np.concatenate([smooth_action, action[:, -1:]], axis=-1) # concatenate the gripper command back
 
-		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
-
-		# ensure action is 2D (T, D)
+		if self.cfg.enable_binary_gripper:
+			# beacause the value of gripper is either 0 or 1, we can reuse the binary threshold to determine open/close 
+   			# and set to predefined values for better sim realism (instead of 0/1 which may not be the actual command value for the robot)
+			smooth_action[:, -1] = np.where(smooth_action[:, -1] > self.cfg.binary_gripper_threshold, self.cfg.gripper_open_value, self.cfg.gripper_closed_value) # threshold gripper command to binary
+		
+  		# ensure action is 2D (T, D)
 		if smooth_action.ndim == 1:
 			action_2d = smooth_action[None, :]
 		elif smooth_action.ndim == 2:
