@@ -47,13 +47,15 @@ class InferenceConfig:
 
 	state_type: str = "qpos"
 	action_type: str = "joint"	
-	
+	absolute_action: bool = True 
+
 	enable_binary_gripper: bool = False
 	binary_gripper_threshold: float = 0.4
 	gripper_open_value: float = 0.5
 	gripper_closed_value: float = 0.2
 
 	enable_action_interpolation: bool = False
+	use_smoothing: bool = False
 	interpolation_method: str = "linear"
 	interpolation_target_steps: int = 0
 
@@ -168,8 +170,14 @@ class PiperVLAClient(InferenceClient):
 			if self.cfg.state_type == "qpos":
 				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
 			elif self.cfg.state_type == "joint":
-				abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
-			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+				if self.cfg.absolute_action:
+					abs_action = action
+				else:
+					abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
+			if self.cfg.use_smoothing:
+				smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+			else:
+				smooth_action = abs_action
 		# binary gripper
 		else:
 			# only smooth the first 6 dimensions for the robot joints, keep the gripper command as is to preserve the discrete open/close behavior
@@ -244,7 +252,6 @@ class PiperVLAClient(InferenceClient):
 		"""Close network resources."""
 		self.zmq_client.close()
 
-
 @draccus.wrap()
 def main(cfg: InferenceConfig) -> None:
 	"""Entrypoint for launching the Piper VLA client from CLI."""
@@ -253,7 +260,6 @@ def main(cfg: InferenceConfig) -> None:
 		runtime.run()
 	finally:
 		runtime.close()
-
 
 if __name__ == "__main__":
 	main()

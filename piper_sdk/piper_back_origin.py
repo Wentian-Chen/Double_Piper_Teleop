@@ -10,6 +10,6 @@ if __name__=="__main__":
     # print(controller.get_state())
     
     controller.set_gripper(1.0)
-    controller.set_joint(np.array([0.04867723,-0.02370157,0.04152138, 0.01727876, 0.33063517, 0.]))
+    controller.set_joint(np.array([0.04867723,-0.02370157,0.04152138, 0.01727876, 0.33063517, 0.])) # 模型启动初始位置
     time.sleep(2)
     controller.set_gripper(0.0)
