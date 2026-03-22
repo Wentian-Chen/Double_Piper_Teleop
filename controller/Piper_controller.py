@@ -1,8 +1,10 @@
 import sys
-sys.path.append("./")
+from pathlib import Path 
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from controller.arm_controller import ArmController
-
 from piper_sdk import *
 import numpy as np
 import time
@@ -133,10 +135,8 @@ if __name__=="__main__":
     controller.set_gripper(0.2)
     controller.set_joint(np.array([0.1,0.1,-0.2,0.3,-0.2,0.5]))
     time.sleep(1)
-    print(controller.get_gripper())
     print(controller.get_state())
 
     controller.set_position(np.array([0.057, 0.0, 0.260, 0.0, 0.085, 0.0]))
     time.sleep(1)
-    print(controller.get_gripper())
     print(controller.get_state())

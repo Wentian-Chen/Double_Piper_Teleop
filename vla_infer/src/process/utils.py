@@ -422,6 +422,52 @@ def linear_interpolate_action_chunk(action_chunk: np.ndarray, target_steps: int)
     return out
 
 
+def interpolate_action_chunk(
+    action_chunk: np.ndarray,
+    target_steps: int,
+    method: str = "linear",
+) -> np.ndarray:
+    """Resample action chunk on time axis for any input dimensionality.
+
+    The first axis is treated as time axis. Remaining axes are treated as
+    action dimensions and preserved after interpolation.
+    """
+    action_np = np.asarray(action_chunk, dtype=np.float32)
+    if action_np.ndim < 1:
+        raise ValueError(f"action_chunk must have at least 1 dimension, got shape={action_np.shape}")
+    if target_steps <= 0:
+        raise ValueError("target_steps must be > 0")
+
+    src_steps = action_np.shape[0]
+    if src_steps <= 0:
+        raise ValueError("action_chunk time dimension must be > 0")
+    if src_steps == target_steps:
+        return action_np.copy()
+    if src_steps == 1:
+        return np.repeat(action_np, repeats=target_steps, axis=0).astype(np.float32)
+
+    method_name = str(method).lower().strip()
+    flat_action = action_np.reshape(src_steps, -1)
+
+    if method_name in ("linear", "lerp"):
+        src_x = np.linspace(0.0, 1.0, num=src_steps, dtype=np.float64)
+        dst_x = np.linspace(0.0, 1.0, num=target_steps, dtype=np.float64)
+        flat_out = np.empty((target_steps, flat_action.shape[1]), dtype=np.float32)
+        for dim_idx in range(flat_action.shape[1]):
+            flat_out[:, dim_idx] = np.interp(dst_x, src_x, flat_action[:, dim_idx]).astype(np.float32)
+    elif method_name in ("nearest", "zoh", "zero_order_hold"):
+        indices = np.rint(np.linspace(0.0, src_steps - 1, num=target_steps)).astype(np.int64)
+        flat_out = flat_action[indices]
+    else:
+        raise ValueError(
+            "unsupported interpolation method: "
+            f"{method}. Expected one of ['linear', 'nearest', 'zoh', 'zero_order_hold']"
+        )
+
+    out_shape = (target_steps,) + action_np.shape[1:]
+    return flat_out.reshape(out_shape).astype(np.float32)
+
+
 def smooth_interpolate_action_chunk(
     action_chunk: np.ndarray,
     target_steps: int,
@@ -546,6 +592,7 @@ __all__ = [
     "minmax_denormalize_action",
     "standard_normalize_action",
     "standard_denormalize_action",
+    "interpolate_action_chunk",
     "linear_interpolate_action_chunk",
     "smooth_interpolate_action_chunk",
     "accel_limited_interpolate_action_chunk",

@@ -112,7 +112,7 @@ class InferenceConfig:
 	log_dir: str = "vla_infer/example/vla-adapter/logs"
 
 	state_type: str = "qpos"
-	action_type: str = "action"
+	action_type: str = "joint"
 	task_instruction: str = "Pick up the banana and place it in the bowl"
 
 class PiperVLAClient(InferenceClient):

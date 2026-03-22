@@ -41,7 +41,7 @@ class VlaAdapterServerConfig:
     num_open_loop_steps: int = 8
     # Version tag forwarded to model.
     save_version: str = "vla-adapter"
-    # Task suite name.
+    # Datasets Task suite name.
     task_suite_name: str = "piper_pick_banana_100_resize_224_converted"
     ip: str = "0.0.0.0"
     port: int = 5555

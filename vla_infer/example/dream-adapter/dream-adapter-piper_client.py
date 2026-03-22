@@ -15,7 +15,8 @@ from vla_infer.src.process.utils import (
     uint8_image_to_float32_01,
     smooth_action_chunk,
     delta_action_chunk_to_absolute,
-	check_uint8_rgb
+	check_uint8_rgb,
+	interpolate_action_chunk,
 )
 import sys
 from pathlib import Path
@@ -49,9 +50,12 @@ class InferenceConfig:
 	
 	enable_binary_gripper: bool = False
 	binary_gripper_threshold: float = 0.4
-	gripper_open_value: float = 0.6
+	gripper_open_value: float = 0.5
 	gripper_closed_value: float = 0.2
 
+	enable_action_interpolation: bool = False
+	interpolation_method: str = "linear"
+	interpolation_target_steps: int = 0
 
 class PiperVLAClient(InferenceClient):
 	"""Client runtime that bridges PiperSingleRobot and VLA server.
@@ -122,7 +126,6 @@ class PiperVLAClient(InferenceClient):
 		self.obs = obs # save for later use in execute
 		if self.cfg.action_type == "joint" and self.cfg.state_type == "qpos":
 			self.obs["joint_state"] = raw_obs.get("state", np.zeros(7, dtype=np.float32)) # save joint state for later use in absolute conversion
-		
 
 		return obs
 
@@ -149,30 +152,43 @@ class PiperVLAClient(InferenceClient):
 	def execute(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
 		"""execute action chunk on robot."""
 		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
-		action = np.asarray(response["action"], dtype=np.float32)
-		# normal absolute + smoothing
-		if not self.cfg.enable_binary_gripper:
-			if self.cfg.state_type == "qpos":
-				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
-			else:
-				abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
-
-			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
-			action = smooth_action
-		# binary gripper
-		else:
-			if self.cfg.state_type == "qpos":
-				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32))[:6], action[:, :6]) # only convert the first 6 dimensions for absolute, keep gripper as is
-			else:
-				abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32))[:6], action[:, :6])
-			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
-			smooth_action = np.concatenate([smooth_action, action[:, -1:]], axis=-1) # concatenate the gripper command back
+		action = np.array(response["action"], dtype=np.float32, copy=True)
 
 		if self.cfg.enable_binary_gripper:
 			# beacause the value of gripper is either 0 or 1, we can reuse the binary threshold to determine open/close 
    			# and set to predefined values for better sim realism (instead of 0/1 which may not be the actual command value for the robot)
-			smooth_action[:, -1] = np.where(smooth_action[:, -1] > self.cfg.binary_gripper_threshold, self.cfg.gripper_open_value, self.cfg.gripper_closed_value) # threshold gripper command to binary
-		
+			action[:, -1] = np.where(
+				action[:, -1] > self.cfg.binary_gripper_threshold,
+				self.cfg.gripper_open_value,
+				self.cfg.gripper_closed_value,
+			)
+			# print("Gripper action before smoothing:", action[:, -1])
+		# normal absolute + smoothing
+		if not self.cfg.enable_binary_gripper:
+			if self.cfg.state_type == "qpos":
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
+			elif self.cfg.state_type == "joint":
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
+			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+		# binary gripper
+		else:
+			# only smooth the first 6 dimensions for the robot joints, keep the gripper command as is to preserve the discrete open/close behavior
+			if self.cfg.state_type == "qpos":
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32))[:6], action[:, :6]) # only convert the first 6 dimensions for absolute, keep gripper as is
+			else:
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32))[:6], action[:, :6])
+			abs_action = np.concatenate([abs_action, action[:, -1:]], axis=-1) # concatenate the gripper command back before smoothing, so that the smoothing function can keep it unchanged
+			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+			print("abs action after smoothing:", smooth_action)
+
+		if self.cfg.enable_action_interpolation:
+			if self.cfg.interpolation_target_steps <= 0:
+				raise ValueError("interpolation_target_steps must be > 0 when enable_action_interpolation=True")
+			smooth_action = interpolate_action_chunk(
+				smooth_action,
+				target_steps=self.cfg.interpolation_target_steps,
+				method=self.cfg.interpolation_method,
+			)
   		# ensure action is 2D (T, D)
 		if smooth_action.ndim == 1:
 			action_2d = smooth_action[None, :]

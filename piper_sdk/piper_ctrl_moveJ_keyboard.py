@@ -41,7 +41,7 @@ class PiperJointKeyboardController:
             (-100, 100),    # joint 3
             (-120, 120),    # joint 4
             (-100, 100),    # joint 5
-            (0, 70)         # gripper (mm)
+            (0, 70)                  # gripper (mm)
         ]
         
         # ===== 长按控制相关参数 =====
