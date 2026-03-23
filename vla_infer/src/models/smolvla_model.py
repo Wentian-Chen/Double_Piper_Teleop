@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import logging
 import typing as t
 
 import numpy as np
 
 from .base import BaseVLAModel
+
+
+@dataclass
+class SmolVLAModelConfig:
+    """Model loading config aligned with LeRobot record pipeline."""
+
+    model_path: str
+    device: str = "cuda"
+    dataset_repo_id: t.Optional[str] = None
+    dataset_root: t.Optional[str] = None
+    action_chunk_size: t.Optional[int] = None
+    default_instruction: str = ""
 
 
 class SmolVLAModel(BaseVLAModel):
@@ -27,6 +41,7 @@ class SmolVLAModel(BaseVLAModel):
         dataset_repo_id: t.Optional[str] = None,
         dataset_root: t.Optional[str] = None,
         action_chunk_size: t.Optional[int] = None,
+        default_instruction: str = "",
     ) -> None:
         """Initialize SmolVLA wrapper.
 
@@ -36,19 +51,31 @@ class SmolVLAModel(BaseVLAModel):
         - `dataset_repo_id`/`dataset_root` are kept for compatibility but are
           not required for inference with pretrained processors.
         """
-        self.dataset_repo_id = dataset_repo_id
-        self.dataset_root = dataset_root
-        self.action_chunk_size = action_chunk_size
+        self.cfg = SmolVLAModelConfig(
+            model_path=model_path,
+            device=device,
+            dataset_repo_id=dataset_repo_id,
+            dataset_root=dataset_root,
+            action_chunk_size=action_chunk_size,
+            default_instruction=default_instruction,
+        )
 
-        self._default_instruction = ""
+        self.model_path = self.cfg.model_path
+        self.device = self.cfg.device
+        self.dataset_repo_id = self.cfg.dataset_repo_id
+        self.dataset_root = self.cfg.dataset_root
+        self.action_chunk_size = self.cfg.action_chunk_size
+
+        self._default_instruction = self.cfg.default_instruction
 
         self._input_mapping: t.Optional[t.Dict[str, t.Optional[str]]] = None
+        self._policy_cfg: t.Any = None
         self._policy: t.Any = None
         self._preprocessor: t.Any = None
         self._postprocessor: t.Any = None
 
         self._torch: t.Any = None
-        super().__init__(model_path=model_path, device=device)
+        super().__init__()
 
     @staticmethod
     def _validate_rgb_image(name: str, value: t.Any) -> np.ndarray:
@@ -148,8 +175,13 @@ class SmolVLAModel(BaseVLAModel):
         """Load SmolVLA policy and processors from LeRobot pretrained artifacts."""
         try:
             import torch
-            from lerobot.policies.factory import make_pre_post_processors
-            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+            from lerobot.configs.policies import PreTrainedConfig
+            from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+            from lerobot.policies.factory import (
+                get_policy_class,
+                make_pre_post_processors,
+                make_policy,
+            )
         except Exception as exc:
             raise ImportError(
                 "Failed to import LeRobot SmolVLA modules. "
@@ -160,7 +192,37 @@ class SmolVLAModel(BaseVLAModel):
         if not self.device:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        policy = SmolVLAPolicy.from_pretrained(self.model_path)
+        # Keep this sequence close to lerobot_record.py for easier cross-debugging.
+        policy_cfg = PreTrainedConfig.from_pretrained(self.model_path)
+        policy_cfg.pretrained_path = self.model_path
+        if getattr(policy_cfg, "device", None) != self.device:
+            policy_cfg.device = self.device
+
+        policy = None
+        ds_meta = None
+        if self.dataset_repo_id is not None:
+            try:
+                ds_meta = LeRobotDatasetMetadata(repo_id=self.dataset_repo_id, root=self.dataset_root)
+            except Exception:
+                logging.exception(
+                    "Failed to load dataset metadata from repo_id=%s root=%s. "
+                    "Falling back to checkpoint-only policy loading.",
+                    self.dataset_repo_id,
+                    self.dataset_root,
+                )
+                ds_meta = None
+
+        # Primary path: same factory used by lerobot_record.py when ds_meta is available.
+        if ds_meta is not None:
+            policy = make_policy(policy_cfg, ds_meta=ds_meta)
+        else:
+            # Fallback path for deployment when only a checkpoint directory is provided.
+            policy_cls = get_policy_class(policy_cfg.type)
+            policy = policy_cls.from_pretrained(
+                pretrained_name_or_path=self.model_path,
+                config=policy_cfg,
+            )
+
         if self.action_chunk_size is not None:
             policy.config.n_action_steps = int(self.action_chunk_size)
             policy.reset()
@@ -168,12 +230,13 @@ class SmolVLAModel(BaseVLAModel):
         policy = policy.to(self.device)
         policy.eval()
 
-        # Keep pre/post processors aligned with the pretrained model card config.
+        # Keep pre/post processors aligned with pretrained artifacts (same as lerobot_record).
         preprocessor, postprocessor = make_pre_post_processors(
-            policy_cfg=policy.config,
+            policy_cfg=policy_cfg,
             pretrained_path=self.model_path,
         )
 
+        self._policy_cfg = policy_cfg
         self._policy = policy
         self._preprocessor = preprocessor
         self._postprocessor = postprocessor
