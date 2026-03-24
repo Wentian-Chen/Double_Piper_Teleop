@@ -37,7 +37,7 @@ python vla_infer/example/dream-adapter/dream-adapter-piper_client.py \
 /home/charles/workspaces/VLA-Adapter/outputs/configs+pick_banana_100_newTable_converted+b16+lr-0.0002+lora-r64+dropout-0.0--image_aug--train-vla-0315-01--20000_chkpt
 
 ```
-
+## 激活机械臂
 ```
 conda activate dream-adapter
 bash piper_sdk/can_single_activate.sh 
@@ -45,7 +45,21 @@ python piper_sdk/piper_enable_modeJ_after_tech.py
 
 python piper_sdk/piper_ctrl_moveJ_keyboard.py
 ```
-
+## smolvla
 ```
+source /home/charles/workspaces/lerobot/.venv/bin/activate
+export HF_ENDPOINT=https://hf-mirror.com
+python vla_infer/example/smolvla/smolvla_server.py \
+    --policy_path /home/charles/workspaces/lerobot/outputs/smolvla/pick_banana_200_newTable_next_state_action_0322_50k/050000/pretrained_model
 
+/home/charles/workspaces/lerobot/outputs/smolvla/pick_banana_200_newTable_0322_45k/045000/pretrained_model
+
+conda activate dream-adapter
+python vla_infer/example/smolvla/smolvla_piper_client.py \
+    --execute_chunk_steps 12 \
+    --control_interval_s 0.02 \
+    --state_type joint \
+    --action_type joint \
+    --control_type absolute \
+    --enable_smooth_action True 
 ```

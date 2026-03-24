@@ -90,6 +90,7 @@ def initialize_model(cfg: JointEvalConfig):
         logger.info("Detected base model checkpoint: %s", cfg.base_model_checkpoint)
         try:
             from peft import PeftModel
+            
             from transformers import (
                 AutoConfig,
                 AutoImageProcessor,

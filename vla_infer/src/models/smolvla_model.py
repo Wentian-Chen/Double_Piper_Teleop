@@ -78,18 +78,42 @@ class SmolVLAModel(BaseVLAModel):
         super().__init__()
 
     @staticmethod
+    def _ensure_writable_contiguous_array(value: t.Any, dtype: t.Any = None) -> np.ndarray:
+        arr = np.asarray(value, dtype=dtype)
+        # PyTorch warns on non-writable numpy buffers (common with frombuffer/ZeroMQ payloads).
+        if (not arr.flags.writeable) or (not arr.flags.c_contiguous) or any(step < 0 for step in arr.strides):
+            arr = np.array(arr, copy=True, order="C")
+        return arr
+
+    @staticmethod
     def _validate_rgb_image(name: str, value: t.Any) -> np.ndarray:
-        if not isinstance(value, np.ndarray):
-            raise ValueError(f"{name} must be numpy.ndarray, got {type(value)}")
-        if value.ndim != 3 or value.shape[-1] != 3:
-            raise ValueError(f"{name} must be HxWx3 RGB array, got shape={value.shape}")
-        if value.strides is not None and any(step < 0 for step in value.strides):
-            return value.copy()
-        return value
+        image = SmolVLAModel._ensure_writable_contiguous_array(value)
+        if image.ndim != 3 or image.shape[-1] != 3:
+            raise ValueError(f"{name} must be HxWx3 RGB array, got shape={image.shape}")
+        return image
+
+    @staticmethod
+    def _to_bchw_float_image(name: str, image: np.ndarray) -> np.ndarray:
+        if image.dtype == np.uint8:
+            image_f32 = image.astype(np.float32) / 255.0
+        elif np.issubdtype(image.dtype, np.floating):
+            image_f32 = image.astype(np.float32, copy=False)
+            min_value = float(np.min(image_f32))
+            max_value = float(np.max(image_f32))
+            if min_value < -1e-6 or max_value > 1.0 + 1e-6:
+                raise ValueError(
+                    f"{name} float image must be in [0, 1], got min={min_value:.6f}, max={max_value:.6f}"
+                )
+        else:
+            raise ValueError(f"{name} image dtype must be uint8 or float, got {image.dtype}")
+
+        # SmolVLA policy expects BCHW image tensors in [0,1].
+        image_bchw = np.transpose(image_f32, (2, 0, 1))[None, ...]
+        return np.ascontiguousarray(image_bchw, dtype=np.float32)
 
     @staticmethod
     def _validate_state(value: t.Any) -> np.ndarray:
-        state = np.asarray(value, dtype=np.float32).reshape(-1)
+        state = SmolVLAModel._ensure_writable_contiguous_array(value, dtype=np.float32).reshape(-1)
         if state.shape[0] != 7:
             raise ValueError(f"state must be shape (7,), got {state.shape}")
         return state
@@ -151,19 +175,25 @@ class SmolVLAModel(BaseVLAModel):
     ) -> t.Dict[str, t.Any]:
         if self._input_mapping is None:
             raise RuntimeError("Input mapping is not initialized. Call load_model first.")
+        if self._torch is None:
+            raise RuntimeError("Torch is not initialized. Call load_model first.")
+
+        def _to_device_tensor(array: np.ndarray) -> t.Any:
+            tensor = self._torch.from_numpy(np.ascontiguousarray(array))
+            return tensor.to(self.device)
 
         payload: t.Dict[str, t.Any] = {
-            t.cast(str, self._input_mapping["head_image_key"]): image,
+            t.cast(str, self._input_mapping["head_image_key"]): _to_device_tensor(image),
             "task": cmd,
         }
 
         wrist_image_key = self._input_mapping["wrist_image_key"]
         if wrist_image_key is not None:
-            payload[wrist_image_key] = wrist_image
+            payload[wrist_image_key] = _to_device_tensor(wrist_image)
 
         state_key = self._input_mapping["state_key"]
         if state_key is not None:
-            payload[state_key] = state
+            payload[state_key] = _to_device_tensor(state)
 
         return payload
 
@@ -176,7 +206,12 @@ class SmolVLAModel(BaseVLAModel):
         try:
             import torch
             from lerobot.configs.policies import PreTrainedConfig
-            from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+            try:
+                # LeRobot <= v0.4.x
+                from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+            except ImportError:
+                # LeRobot >= v0.5.x
+                raise ImportError("LeRobotDatasetMetadata not found in lerobot.datasets.lerobot_dataset")
             from lerobot.policies.factory import (
                 get_policy_class,
                 make_pre_post_processors,
@@ -247,8 +282,10 @@ class SmolVLAModel(BaseVLAModel):
         self._ensure_loaded()
 
         cmd = str(observation.get("cmd", self._default_instruction) or self._default_instruction)
-        image = self._validate_rgb_image("image", observation.get("image"))
-        wrist_image = self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        image = self._to_bchw_float_image("image", self._validate_rgb_image("image", observation.get("image")))
+        wrist_image = self._to_bchw_float_image(
+            "wrist_image", self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        )
         state = self._validate_state(observation.get("state"))
 
         payload = self._build_policy_input(cmd=cmd, image=image, wrist_image=wrist_image, state=state)
@@ -264,8 +301,10 @@ class SmolVLAModel(BaseVLAModel):
         self._ensure_loaded()
 
         cmd = str(observation.get("cmd", self._default_instruction) or self._default_instruction)
-        image = self._validate_rgb_image("image", observation.get("image"))
-        wrist_image = self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        image = self._to_bchw_float_image("image", self._validate_rgb_image("image", observation.get("image")))
+        wrist_image = self._to_bchw_float_image(
+            "wrist_image", self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        )
         state = self._validate_state(observation.get("state"))
 
         payload = self._build_policy_input(cmd=cmd, image=image, wrist_image=wrist_image, state=state)

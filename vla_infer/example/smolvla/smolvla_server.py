@@ -23,15 +23,16 @@ class SmolVLAServerConfig:
     model_path: str = ""
     # Device used by the policy and pre/post processors.
     device: str = "cuda"
-    # Kept for compatibility with existing configs. No required
-    dataset_repo_id: t.Optional[str] = None
-    # Kept for compatibility with existing configs. No required
-    dataset_root: t.Optional[str] = None
+    # Draccus+argparse on Python 3.14 cannot parse Optional[T] reliably here.
+    # Use empty-string / negative sentinels and normalize before model init.
+    dataset_repo_id: str = ""
+    dataset_root: str = ""
     # Override action chunk size (maps to policy.config.n_action_steps).
-    action_chunk_size: t.Optional[int] = None
+    # <= 0 means "use model default".
+    action_chunk_size: int = -1
     # Fallback instruction when request payload has no cmd.
     default_instruction: str = ""
-    ip: str = "127.0.0.1"
+    ip: str = "0.0.0.0"
     port: int = 5555
     jpeg_quality: int = 80
     log_level: str = "INFO"
@@ -50,15 +51,20 @@ def main(cfg: SmolVLAServerConfig) -> None:
     logging.info("SmolVLA server config:\n%s", pformat(cfg))
     logging.info("Starting SmolVLA server on tcp://%s:%s", cfg.ip, cfg.port)
 
+    dataset_repo_id = cfg.dataset_repo_id.strip() or None
+    dataset_root = cfg.dataset_root.strip() or None
+    action_chunk_size = cfg.action_chunk_size if cfg.action_chunk_size > 0 else None
+    
+    zmq_server = VlaZmqServer(ip=cfg.ip, port=cfg.port, jpeg_quality=cfg.jpeg_quality)
+
     model = SmolVLAModel(
         model_path=resolved_model_path,
         device=cfg.device,
-        dataset_repo_id=cfg.dataset_repo_id,
-        dataset_root=cfg.dataset_root,
-        action_chunk_size=cfg.action_chunk_size,
+        dataset_repo_id=dataset_repo_id,
+        dataset_root=dataset_root,
+        action_chunk_size=action_chunk_size,
         default_instruction=cfg.default_instruction,
     )
-    zmq_server = VlaZmqServer(ip=cfg.ip, port=cfg.port, jpeg_quality=cfg.jpeg_quality)
     server = ModelZmqInferenceServer(model=model, zmq_server=zmq_server)
     server.start()
 
