@@ -43,6 +43,10 @@ class ArmController(Controller):
             for key, value in move_data.items():
                 if key == "joint":
                     self.set_joint(np.array(value))
+                    # while True:
+                    # # 判断夹爪是否到位
+                    #     if sum(abs(self.get_state()["joint"] - value)) < 0.04:
+                    #         break
                 elif key == "qpos":
                     self.set_position(np.array(value))
         
@@ -54,6 +58,10 @@ class ArmController(Controller):
                 self.set_action(np.array(value))
             if key == "gripper":
                 self.set_gripper(np.array(value))
+                # while True:
+                #     # 判断夹爪是否到位
+                #     if abs(self.get_state()["gripper"] - value) < 0.02:
+                #         break
             if key == "velocity":
                 self.set_velocity(np.array(value))
             if key == "force":

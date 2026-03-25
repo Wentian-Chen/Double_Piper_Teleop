@@ -101,7 +101,7 @@ class InferenceConfig:
 	timeout_ms: int = 2000
 	jpeg_quality: int = 80
 
-	
+	show_output_track: bool = False
 	max_steps: int = 1000
 	stop_on_timeout: bool = True
 	execute_chunk_steps: int = 8
@@ -113,6 +113,9 @@ class InferenceConfig:
 
 	state_type: str = "qpos"
 	action_type: str = "joint"
+	# delta or absolute
+	control_type: str = "absolute"
+	enable_smooth_action: bool = True
 	task_instruction: str = "Pick up the banana and place it in the bowl"
 
 class PiperVLAClient(InferenceClient):
@@ -134,15 +137,16 @@ class PiperVLAClient(InferenceClient):
 		client: t.Optional[VlaZmqClient] = None,
 	) -> None:
 		self.cfg = cfg
+		self.show_output_track = cfg.show_output_track
 		logging.basicConfig(
 			level=getattr(logging, cfg.log_level.upper(), logging.INFO),
 			format="%(asctime)s - %(levelname)s - %(message)s",
 		)
 
 		self.robot = robot if robot is not None else PiperSingleRobot()
-		time.sleep(2)
+		time.sleep(4)
 		self.robot.reset()  # Ensure robot is ready before connecting to server
-		time.sleep(2)
+		time.sleep(4)
 		self.zmq_client = (
 			client
 			if client is not None
@@ -178,8 +182,8 @@ class PiperVLAClient(InferenceClient):
 		}
 
 		# Ensure images are HWC3 uint8 before resize to satisfy model input contract.
-		obs["image"] = check_uint8_rgb(adaptive_resize_image(obs["image"]))
-		obs["wrist_image"] = check_uint8_rgb(adaptive_resize_image(obs["wrist_image"]))
+		obs["image"] = check_uint8_rgb((obs["image"]))
+		obs["wrist_image"] = check_uint8_rgb((obs["wrist_image"]))
 		
 		self.obs = obs # save for later use in execute
 		if self.cfg.action_type == "joint" and self.cfg.state_type == "qpos":
@@ -211,13 +215,20 @@ class PiperVLAClient(InferenceClient):
 		"""execute action chunk on robot."""
 		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
 		action = np.asarray(response["action"], dtype=np.float32)
-		if self.cfg.state_type == "qpos":
-			abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
+		# convert delta to absolute if needed
+		if self.cfg.control_type == "delta":
+			if self.cfg.state_type == "qpos":
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
+			elif self.cfg.state_type == "joint":
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
+		elif self.cfg.control_type == "absolute":
+			abs_action = np.array(action, dtype=np.float32)
+		# smooth
+		if self.cfg.enable_smooth_action:
+			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
 		else:
-			abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
-
-		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
-
+			smooth_action = abs_action
+		# interpolate
 		if self.cfg.enable_inference_log:
 			if self.inference_log_file_path is None:
 				raise RuntimeError("inference_log_file_path is not initialized")
@@ -250,6 +261,7 @@ class PiperVLAClient(InferenceClient):
 
 		return {
 			"executed_steps": execute_steps,
+			"output_action": action_2d[:execute_steps],
 			"action_shape": tuple(action_2d.shape),
 		}
 	
@@ -262,8 +274,8 @@ class PiperVLAClient(InferenceClient):
 		return {
 			"action":  response,
 			"execution": execution_result,
+			"observation": observation,
 		}
-
 	def run(self, max_steps: t.Optional[int] = None) -> None:
 		"""Run the continuous control loop."""
 		step_limit = self.cfg.max_steps if max_steps is None else max_steps
@@ -283,6 +295,29 @@ class PiperVLAClient(InferenceClient):
 			try:
 				self.current_step_index = step
 				cycle_report = self.run_once()
+				
+				if self.show_output_track:
+					filepath = Path("/home/charles/workspaces/Double_Piper_Teleop/tem.json")
+					if filepath.exists() and step == 0: 
+						filepath.unlink()
+
+					data_log = {
+						"step": step,
+						"output_action": np.asarray(cycle_report["execution"]["output_action"]).tolist(),
+						"state": np.asarray(cycle_report["observation"]["state"]).tolist()
+					}
+
+					if filepath.exists():
+						with open(filepath, 'r', encoding='utf-8') as f:
+							data = json.load(f)
+						data["log"].append(data_log)
+					else:
+						data = {"log": [data_log]}
+				
+					# 写回文件（覆盖写入完整更新后的数据）
+					with open(filepath, 'w', encoding='utf-8') as f:
+						json.dump(data, f, indent=2)
+
 				logging.debug("loop_step=%s report=%s", step, cycle_report)
 			except TimeoutError:
 				logging.exception("Server timeout at step=%s", step)

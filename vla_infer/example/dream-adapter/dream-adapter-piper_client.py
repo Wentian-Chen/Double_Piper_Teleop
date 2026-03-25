@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import logging
 import time
 import typing as t
-
+import json
 import draccus
 import numpy as np
 
@@ -15,7 +15,8 @@ from vla_infer.src.process.utils import (
     uint8_image_to_float32_01,
     smooth_action_chunk,
     delta_action_chunk_to_absolute,
-	check_uint8_rgb
+	check_uint8_rgb,
+	interpolate_action_chunk,
 )
 import sys
 from pathlib import Path
@@ -45,8 +46,20 @@ class InferenceConfig:
 	log_level: str = "INFO"
 
 	state_type: str = "qpos"
-	action_type: str = "joint"
+	action_type: str = "joint"	
+	absolute_action: bool = True 
 
+	enable_binary_gripper: bool = False
+	binary_gripper_threshold: float = 0.4
+	gripper_open_value: float = 0.5
+	gripper_closed_value: float = 0.2
+
+	enable_action_interpolation: bool = False
+	use_smoothing: bool = False
+	interpolation_method: str = "linear"
+	interpolation_target_steps: int = 0
+
+	show_output_track: bool = False
 
 class PiperVLAClient(InferenceClient):
 	"""Client runtime that bridges PiperSingleRobot and VLA server.
@@ -67,6 +80,7 @@ class PiperVLAClient(InferenceClient):
 		client: t.Optional[VlaZmqClient] = None,
 	) -> None:
 		self.cfg = cfg
+		self.show_output_track = cfg.show_output_track
 		logging.basicConfig(
 			level=getattr(logging, cfg.log_level.upper(), logging.INFO),
 			format="%(asctime)s - %(levelname)s - %(message)s",
@@ -87,7 +101,6 @@ class PiperVLAClient(InferenceClient):
 		)
 		self.obs: t.Dict[str, t.Any] = {}
   
-
 	def get_observation(self) -> t.Dict[str, t.Any]:
 		"""Abstract step 1: collect and preprocess one observation payload."""
 		raw_obs = self.robot.get_observation()
@@ -97,7 +110,7 @@ class PiperVLAClient(InferenceClient):
 			gripper_value = np.asarray([raw_obs.get("gripper", 0.0)], dtype=np.float32)
 			state = np.concatenate([qpos_value, gripper_value], axis=0)
 		elif self.cfg.state_type == "joint":
-			state = raw_obs.get("joint", np.zeros(7, dtype=np.float32))
+			state = raw_obs.get("state", np.zeros(7, dtype=np.float32))
 
 		obs = {
 			"state": state,
@@ -110,10 +123,14 @@ class PiperVLAClient(InferenceClient):
 		# Ensure images are HWC3 uint8 before resize to satisfy model input contract.
 		# obs["image"] = ensure_hwc3_uint8_image(np.asarray(obs["image"]))
 		# obs["wrist_image"] = ensure_hwc3_uint8_image(np.asarray(obs["wrist_image"]))
-		
+  
+		# binary gripper state (open/close) for discrete action models, determined by thresholding the last element of state vector (gripper position)
+		if self.cfg.enable_binary_gripper:
+			obs["state"][-1] = 1.0 if obs["state"][-1] > self.cfg.binary_gripper_threshold else 0.0
+   
 		self.obs = obs # save for later use in execute
 		if self.cfg.action_type == "joint" and self.cfg.state_type == "qpos":
-			self.obs["joint_state"] = state # save joint state for later use in absolute conversion
+			self.obs["joint_state"] = raw_obs.get("state", np.zeros(7, dtype=np.float32)) # save joint state for later use in absolute conversion
 
 		return obs
 
@@ -140,15 +157,50 @@ class PiperVLAClient(InferenceClient):
 	def execute(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
 		"""execute action chunk on robot."""
 		# post-process action if needed (e.g. convert delta to absolute, apply smoothing, etc.)
-		action = np.asarray(response["action"], dtype=np.float32)
-		if self.cfg.state_type == "qpos":
-			abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
+		action = np.array(response["action"], dtype=np.float32, copy=True)
+
+		if self.cfg.enable_binary_gripper:
+			# beacause the value of gripper is either 0 or 1, we can reuse the binary threshold to determine open/close 
+   			# and set to predefined values for better sim realism (instead of 0/1 which may not be the actual command value for the robot)
+			action[:, -1] = np.where(
+				action[:, -1] > self.cfg.binary_gripper_threshold,
+				self.cfg.gripper_open_value,
+				self.cfg.gripper_closed_value,
+			)
+			# print("Gripper action before smoothing:", action[:, -1])
+		# normal absolute + smoothing
+		if not self.cfg.enable_binary_gripper:
+			if self.cfg.state_type == "qpos":
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32)), action)
+			elif self.cfg.state_type == "joint":
+				if self.cfg.absolute_action:
+					abs_action = action
+				else:
+					abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
+			if self.cfg.use_smoothing:
+				smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+			else:
+				smooth_action = abs_action
+		# binary gripper
 		else:
-			abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32)), action)
+			# only smooth the first 6 dimensions for the robot joints, keep the gripper command as is to preserve the discrete open/close behavior
+			if self.cfg.state_type == "qpos":
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("joint_state", np.zeros(7, dtype=np.float32))[:6], action[:, :6]) # only convert the first 6 dimensions for absolute, keep gripper as is
+			else:
+				abs_action = delta_action_chunk_to_absolute(self.obs.get("state", np.zeros(7, dtype=np.float32))[:6], action[:, :6])
+			abs_action = np.concatenate([abs_action, action[:, -1:]], axis=-1) # concatenate the gripper command back before smoothing, so that the smoothing function can keep it unchanged
+			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
+			print("abs action after smoothing:", smooth_action)
 
-		smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
-
-		# ensure action is 2D (T, D)
+		if self.cfg.enable_action_interpolation:
+			if self.cfg.interpolation_target_steps <= 0:
+				raise ValueError("interpolation_target_steps must be > 0 when enable_action_interpolation=True")
+			smooth_action = interpolate_action_chunk(
+				smooth_action,
+				target_steps=self.cfg.interpolation_target_steps,
+				method=self.cfg.interpolation_method,
+			)
+  		# ensure action is 2D (T, D)
 		if smooth_action.ndim == 1:
 			action_2d = smooth_action[None, :]
 		elif smooth_action.ndim == 2:
@@ -158,6 +210,10 @@ class PiperVLAClient(InferenceClient):
 
 		execute_steps = min(max(1, self.cfg.execute_chunk_steps), action_2d.shape[0])
 
+		##################
+		# action_2d = action_2d[execute_steps:]
+		##################
+
 		for idx in range(execute_steps):
 			#  self.robot.get_state()["state"] 
 			self.robot.apply_action({"action":action_2d[idx]})
@@ -166,6 +222,7 @@ class PiperVLAClient(InferenceClient):
 
 		return {
 			"executed_steps": execute_steps,
+			"output_action": action_2d[:execute_steps],
 			"action_shape": tuple(action_2d.shape),
 		}
 	
@@ -178,6 +235,7 @@ class PiperVLAClient(InferenceClient):
 		return {
 			"action":  response,
 			"execution": execution_result,
+			"observation": observation,
 		}
 
 	def run(self, max_steps: t.Optional[int] = None) -> None:
@@ -190,6 +248,28 @@ class PiperVLAClient(InferenceClient):
 		for step in range(step_limit):
 			try:
 				cycle_report = self.run_once()
+				if self.show_output_track:
+					filepath = Path("/home/charles/workspaces/Double_Piper_Teleop/tem.json")
+					if filepath.exists() and step == 0: 
+						filepath.unlink()
+
+					data_log = {
+						"step": step,
+						"output_action": np.asarray(cycle_report["execution"]["output_action"]).tolist(),
+						"state": np.asarray(cycle_report["observation"]["state"]).tolist()
+					}
+
+					if filepath.exists():
+						with open(filepath, 'r', encoding='utf-8') as f:
+							data = json.load(f)
+						data["log"].append(data_log)
+					else:
+						data = {"log": [data_log]}
+				
+					# 写回文件（覆盖写入完整更新后的数据）
+					with open(filepath, 'w', encoding='utf-8') as f:
+						json.dump(data, f, indent=2)
+
 				logging.debug("loop_step=%s report=%s", step, cycle_report)
 			except TimeoutError:
 				logging.exception("Server timeout at step=%s", step)
@@ -203,7 +283,6 @@ class PiperVLAClient(InferenceClient):
 		"""Close network resources."""
 		self.zmq_client.close()
 
-
 @draccus.wrap()
 def main(cfg: InferenceConfig) -> None:
 	"""Entrypoint for launching the Piper VLA client from CLI."""
@@ -212,7 +291,6 @@ def main(cfg: InferenceConfig) -> None:
 		runtime.run()
 	finally:
 		runtime.close()
-
 
 if __name__ == "__main__":
 	main()

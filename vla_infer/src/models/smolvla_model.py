@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import logging
 import typing as t
 
 import numpy as np
 
 from .base import BaseVLAModel
+
+
+@dataclass
+class SmolVLAModelConfig:
+    """Model loading config aligned with LeRobot record pipeline."""
+
+    model_path: str
+    device: str = "cuda"
+    dataset_repo_id: t.Optional[str] = None
+    dataset_root: t.Optional[str] = None
+    action_chunk_size: t.Optional[int] = None
+    default_instruction: str = ""
 
 
 class SmolVLAModel(BaseVLAModel):
@@ -27,6 +41,7 @@ class SmolVLAModel(BaseVLAModel):
         dataset_repo_id: t.Optional[str] = None,
         dataset_root: t.Optional[str] = None,
         action_chunk_size: t.Optional[int] = None,
+        default_instruction: str = "",
     ) -> None:
         """Initialize SmolVLA wrapper.
 
@@ -36,33 +51,69 @@ class SmolVLAModel(BaseVLAModel):
         - `dataset_repo_id`/`dataset_root` are kept for compatibility but are
           not required for inference with pretrained processors.
         """
-        self.dataset_repo_id = dataset_repo_id
-        self.dataset_root = dataset_root
-        self.action_chunk_size = action_chunk_size
+        self.cfg = SmolVLAModelConfig(
+            model_path=model_path,
+            device=device,
+            dataset_repo_id=dataset_repo_id,
+            dataset_root=dataset_root,
+            action_chunk_size=action_chunk_size,
+            default_instruction=default_instruction,
+        )
 
-        self._default_instruction = ""
+        self.model_path = self.cfg.model_path
+        self.device = self.cfg.device
+        self.dataset_repo_id = self.cfg.dataset_repo_id
+        self.dataset_root = self.cfg.dataset_root
+        self.action_chunk_size = self.cfg.action_chunk_size
+
+        self._default_instruction = self.cfg.default_instruction
 
         self._input_mapping: t.Optional[t.Dict[str, t.Optional[str]]] = None
+        self._policy_cfg: t.Any = None
         self._policy: t.Any = None
         self._preprocessor: t.Any = None
         self._postprocessor: t.Any = None
 
         self._torch: t.Any = None
-        super().__init__(model_path=model_path, device=device)
+        super().__init__()
+
+    @staticmethod
+    def _ensure_writable_contiguous_array(value: t.Any, dtype: t.Any = None) -> np.ndarray:
+        arr = np.asarray(value, dtype=dtype)
+        # PyTorch warns on non-writable numpy buffers (common with frombuffer/ZeroMQ payloads).
+        if (not arr.flags.writeable) or (not arr.flags.c_contiguous) or any(step < 0 for step in arr.strides):
+            arr = np.array(arr, copy=True, order="C")
+        return arr
 
     @staticmethod
     def _validate_rgb_image(name: str, value: t.Any) -> np.ndarray:
-        if not isinstance(value, np.ndarray):
-            raise ValueError(f"{name} must be numpy.ndarray, got {type(value)}")
-        if value.ndim != 3 or value.shape[-1] != 3:
-            raise ValueError(f"{name} must be HxWx3 RGB array, got shape={value.shape}")
-        if value.strides is not None and any(step < 0 for step in value.strides):
-            return value.copy()
-        return value
+        image = SmolVLAModel._ensure_writable_contiguous_array(value)
+        if image.ndim != 3 or image.shape[-1] != 3:
+            raise ValueError(f"{name} must be HxWx3 RGB array, got shape={image.shape}")
+        return image
+
+    @staticmethod
+    def _to_bchw_float_image(name: str, image: np.ndarray) -> np.ndarray:
+        if image.dtype == np.uint8:
+            image_f32 = image.astype(np.float32) / 255.0
+        elif np.issubdtype(image.dtype, np.floating):
+            image_f32 = image.astype(np.float32, copy=False)
+            min_value = float(np.min(image_f32))
+            max_value = float(np.max(image_f32))
+            if min_value < -1e-6 or max_value > 1.0 + 1e-6:
+                raise ValueError(
+                    f"{name} float image must be in [0, 1], got min={min_value:.6f}, max={max_value:.6f}"
+                )
+        else:
+            raise ValueError(f"{name} image dtype must be uint8 or float, got {image.dtype}")
+
+        # SmolVLA policy expects BCHW image tensors in [0,1].
+        image_bchw = np.transpose(image_f32, (2, 0, 1))[None, ...]
+        return np.ascontiguousarray(image_bchw, dtype=np.float32)
 
     @staticmethod
     def _validate_state(value: t.Any) -> np.ndarray:
-        state = np.asarray(value, dtype=np.float32).reshape(-1)
+        state = SmolVLAModel._ensure_writable_contiguous_array(value, dtype=np.float32).reshape(-1)
         if state.shape[0] != 7:
             raise ValueError(f"state must be shape (7,), got {state.shape}")
         return state
@@ -124,19 +175,25 @@ class SmolVLAModel(BaseVLAModel):
     ) -> t.Dict[str, t.Any]:
         if self._input_mapping is None:
             raise RuntimeError("Input mapping is not initialized. Call load_model first.")
+        if self._torch is None:
+            raise RuntimeError("Torch is not initialized. Call load_model first.")
+
+        def _to_device_tensor(array: np.ndarray) -> t.Any:
+            tensor = self._torch.from_numpy(np.ascontiguousarray(array))
+            return tensor.to(self.device)
 
         payload: t.Dict[str, t.Any] = {
-            t.cast(str, self._input_mapping["head_image_key"]): image,
+            t.cast(str, self._input_mapping["head_image_key"]): _to_device_tensor(image),
             "task": cmd,
         }
 
         wrist_image_key = self._input_mapping["wrist_image_key"]
         if wrist_image_key is not None:
-            payload[wrist_image_key] = wrist_image
+            payload[wrist_image_key] = _to_device_tensor(wrist_image)
 
         state_key = self._input_mapping["state_key"]
         if state_key is not None:
-            payload[state_key] = state
+            payload[state_key] = _to_device_tensor(state)
 
         return payload
 
@@ -148,8 +205,18 @@ class SmolVLAModel(BaseVLAModel):
         """Load SmolVLA policy and processors from LeRobot pretrained artifacts."""
         try:
             import torch
-            from lerobot.policies.factory import make_pre_post_processors
-            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+            from lerobot.configs.policies import PreTrainedConfig
+            try:
+                # LeRobot <= v0.4.x
+                from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+            except ImportError:
+                # LeRobot >= v0.5.x
+                raise ImportError("LeRobotDatasetMetadata not found in lerobot.datasets.lerobot_dataset")
+            from lerobot.policies.factory import (
+                get_policy_class,
+                make_pre_post_processors,
+                make_policy,
+            )
         except Exception as exc:
             raise ImportError(
                 "Failed to import LeRobot SmolVLA modules. "
@@ -160,7 +227,37 @@ class SmolVLAModel(BaseVLAModel):
         if not self.device:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        policy = SmolVLAPolicy.from_pretrained(self.model_path)
+        # Keep this sequence close to lerobot_record.py for easier cross-debugging.
+        policy_cfg = PreTrainedConfig.from_pretrained(self.model_path)
+        policy_cfg.pretrained_path = self.model_path
+        if getattr(policy_cfg, "device", None) != self.device:
+            policy_cfg.device = self.device
+
+        policy = None
+        ds_meta = None
+        if self.dataset_repo_id is not None:
+            try:
+                ds_meta = LeRobotDatasetMetadata(repo_id=self.dataset_repo_id, root=self.dataset_root)
+            except Exception:
+                logging.exception(
+                    "Failed to load dataset metadata from repo_id=%s root=%s. "
+                    "Falling back to checkpoint-only policy loading.",
+                    self.dataset_repo_id,
+                    self.dataset_root,
+                )
+                ds_meta = None
+
+        # Primary path: same factory used by lerobot_record.py when ds_meta is available.
+        if ds_meta is not None:
+            policy = make_policy(policy_cfg, ds_meta=ds_meta)
+        else:
+            # Fallback path for deployment when only a checkpoint directory is provided.
+            policy_cls = get_policy_class(policy_cfg.type)
+            policy = policy_cls.from_pretrained(
+                pretrained_name_or_path=self.model_path,
+                config=policy_cfg,
+            )
+
         if self.action_chunk_size is not None:
             policy.config.n_action_steps = int(self.action_chunk_size)
             policy.reset()
@@ -168,12 +265,13 @@ class SmolVLAModel(BaseVLAModel):
         policy = policy.to(self.device)
         policy.eval()
 
-        # Keep pre/post processors aligned with the pretrained model card config.
+        # Keep pre/post processors aligned with pretrained artifacts (same as lerobot_record).
         preprocessor, postprocessor = make_pre_post_processors(
-            policy_cfg=policy.config,
+            policy_cfg=policy_cfg,
             pretrained_path=self.model_path,
         )
 
+        self._policy_cfg = policy_cfg
         self._policy = policy
         self._preprocessor = preprocessor
         self._postprocessor = postprocessor
@@ -184,8 +282,10 @@ class SmolVLAModel(BaseVLAModel):
         self._ensure_loaded()
 
         cmd = str(observation.get("cmd", self._default_instruction) or self._default_instruction)
-        image = self._validate_rgb_image("image", observation.get("image"))
-        wrist_image = self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        image = self._to_bchw_float_image("image", self._validate_rgb_image("image", observation.get("image")))
+        wrist_image = self._to_bchw_float_image(
+            "wrist_image", self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        )
         state = self._validate_state(observation.get("state"))
 
         payload = self._build_policy_input(cmd=cmd, image=image, wrist_image=wrist_image, state=state)
@@ -201,8 +301,10 @@ class SmolVLAModel(BaseVLAModel):
         self._ensure_loaded()
 
         cmd = str(observation.get("cmd", self._default_instruction) or self._default_instruction)
-        image = self._validate_rgb_image("image", observation.get("image"))
-        wrist_image = self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        image = self._to_bchw_float_image("image", self._validate_rgb_image("image", observation.get("image")))
+        wrist_image = self._to_bchw_float_image(
+            "wrist_image", self._validate_rgb_image("wrist_image", observation.get("wrist_image"))
+        )
         state = self._validate_state(observation.get("state"))
 
         payload = self._build_policy_input(cmd=cmd, image=image, wrist_image=wrist_image, state=state)

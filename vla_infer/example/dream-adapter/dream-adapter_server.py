@@ -83,5 +83,6 @@ def main(cfg: DreamAdapterServerConfig) -> None:
 
     server = ModelZmqInferenceServer(model=model, zmq_server=zmq_server)
     server.start()
+
 if __name__ == "__main__":
     main()

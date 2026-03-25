@@ -12,11 +12,14 @@ __pycache__/
 脚本.txt
 build/
 *.egg-info/
+openloop_eval_plots_joint/
+vla_infer/example/vla-adapter/logs/
 # datasets
 datasets/
 save/
 datasets_rlds/
 .vscode/
+datasets_lerobot/
 # example/teleop
 test/*
 tests/*

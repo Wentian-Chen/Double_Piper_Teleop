@@ -21,14 +21,15 @@ import torch
 import tqdm
 from PIL import Image
 
-# Append VLA-Adapter project root
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../VLA-Adapter/")))
+# Append Dream-Adapter project root
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../Dream-Adapter/")))
 
 from experiments.robot.openvla_utils import (  # noqa: E402
     get_action_head,
     get_processor,
     get_proprio_projector,
     get_vla_action,
+    get_reconstruct_images,
 )
 from experiments.robot.robot_utils import get_model, set_seed_everywhere  # noqa: E402
 
@@ -43,22 +44,18 @@ logger = logging.getLogger(__name__)
 # Prevent TensorFlow from reserving GPU memory used by PyTorch
 tf.config.set_visible_devices([], "GPU")
 
-
 @dataclass
 class JointEvalConfig:
     # Model parameters
     pretrained_checkpoint: Union[str, Path] = (
-        "/home/lxx/repo/VLA-Adapter/outputs/"
-        "configs+piper_pick_banana_100_resize_224_converted+b16+lr-0.0002+"
-        "lora-r64+dropout-0.0--image_aug--train-0306-02--20000_chkpt"
+        "/home/charles/workspaces/Dream-adapter/outputs/configs+pick_banana_200_newTable_2_offset_state_absolute_converted+b16+lr-0.0002+lora-r32+dropout-0.0--image_aug--train-2_offset_absolute-0323-01--20000_chkpt"
     )
     base_model_checkpoint: Optional[Union[str, Path]] = None
     model_family: str = "openvla"
 
     # Dataset parameters (Dream-Adapter converted format)
     dataset_path: Union[str, Path] = (
-        "/home/lxx/repo/datasets/dream-adapter/miku112/"
-        "piper_pick_banana_100_resize_224_converted"
+        "/home/charles/workspaces/Dream-adapter/datasets/pick_banana_200_newTable_2_offset_state_absolute_converted"
     )
     max_episodes: Optional[int] = None
     action_key: str = "action"
@@ -74,15 +71,15 @@ class JointEvalConfig:
     use_film: bool = False
     num_images_in_input: int = 2
     use_proprio: bool = True
+    use_reconstruct_images: bool = True
     center_crop: bool = True
-    num_open_loop_steps: int = 1
-    unnorm_key: str = "piper_pick_banana_100_resize_224_converted"
+    num_open_loop_steps: int = 8
+    unnorm_key: str = "pick_banana_200_newTable_2_offset_state_absolute_converted"
     save_version: str = "vla-adapter"
 
     # Output
     plots_dir: Union[str, Path] = "openloop_eval_plots_joint"
     plot_first_n_episodes: int = 5
-
 
 def initialize_model(cfg: JointEvalConfig):
     """Initialize model and optional heads/projectors."""
@@ -142,6 +139,7 @@ def initialize_model(cfg: JointEvalConfig):
 
     action_head = None
     proprio_projector = None
+    reconstruct_images = None
 
     try:
         llm_dim = model.config.text_config.hidden_size
@@ -158,9 +156,11 @@ def initialize_model(cfg: JointEvalConfig):
             proprio_dim=cfg.proprio_dim,
         )
 
+    if cfg.use_reconstruct_images:
+        reconstruct_images = get_reconstruct_images(cfg, model.llm_dim, image_dim=588, predict_image_frame=1)
+    
     processor = get_processor(cfg) if cfg.model_family == "openvla" else None
-    return model, action_head, proprio_projector, processor
-
+    return model, action_head, reconstruct_images, proprio_projector, processor
 
 def _load_stats(cfg: JointEvalConfig, model) -> None:
     checkpoint_stats = os.path.join(cfg.pretrained_checkpoint, "dataset_statistics.json")
@@ -185,7 +185,6 @@ def _load_stats(cfg: JointEvalConfig, model) -> None:
     else:
         model.norm_stats.update(stats)
 
-
 def _list_episode_dirs(dataset_path: Path, max_episodes: Optional[int]) -> List[Path]:
     episodes_root = dataset_path / "episodes"
     if not episodes_root.exists():
@@ -198,14 +197,12 @@ def _list_episode_dirs(dataset_path: Path, max_episodes: Optional[int]) -> List[
         episode_dirs = episode_dirs[:max_episodes]
     return episode_dirs
 
-
 def _decode_text(value, default: str) -> str:
     if value is None:
         return default
     if isinstance(value, (bytes, np.bytes_)):
         return value.decode("utf-8", errors="ignore")
     return str(value)
-
 
 def _align_action_shape(pred_action: np.ndarray, gt_action: np.ndarray) -> np.ndarray:
     if pred_action.shape == gt_action.shape:
@@ -214,13 +211,12 @@ def _align_action_shape(pred_action: np.ndarray, gt_action: np.ndarray) -> np.nd
         return pred_action.reshape(gt_action.shape)
     raise ValueError(f"Cannot align prediction shape {pred_action.shape} to {gt_action.shape}")
 
-
 @draccus.wrap()
 def eval_openloop_joint(cfg: JointEvalConfig) -> None:
     set_seed_everywhere(0)
 
     logger.info("Loading model from %s", cfg.pretrained_checkpoint)
-    model, action_head, proprio_projector, processor = initialize_model(cfg)
+    model, action_head, reconstruct_images, proprio_projector, processor = initialize_model(cfg)
     model.eval()
 
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
@@ -289,8 +285,10 @@ def eval_openloop_joint(cfg: JointEvalConfig) -> None:
                     task_label,
                     action_head=action_head,
                     proprio_projector=proprio_projector,
+                    reconstruct_images=reconstruct_images,
                     use_minivlm=cfg.use_minivlm,
                 )
+
                 pred_action = np.asarray(pred[0], dtype=np.float32)
                 pred_action = _align_action_shape(pred_action, gt_action)
             except Exception as exc:

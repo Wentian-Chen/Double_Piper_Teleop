@@ -44,7 +44,7 @@ START_POSITION_ANGLE_RIGHT_ARM = [
 condition = {
     "robot":"piper_single",
     "save_path": "./datasets/", 
-    "task_name": "pick_banana_0305", 
+    "task_name": "pick_banana_0318_2", 
     "save_format": "hdf5", 
     "save_freq": 10, 
 }
@@ -72,6 +72,14 @@ class PiperSingle(Robot):
     # ============== init ==============
     def reset(self):
        self.controllers["arm"]["left_arm"].reset(np.array(START_POSITION_ANGLE_LEFT_ARM))
+       move_data = {
+        "arm":{
+            "left_arm":{
+            "gripper":0.4,
+            },
+            },
+        }
+       self.move(move_data)
     def reset_position(self):
          self.controllers["arm"]["left_arm"].reset_position(np.array(START_POSITION_POS_LEFT_ARM))
     def set_up(self):
