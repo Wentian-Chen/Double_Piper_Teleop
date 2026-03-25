@@ -72,6 +72,14 @@ class PiperSingle(Robot):
     # ============== init ==============
     def reset(self):
        self.controllers["arm"]["left_arm"].reset(np.array(START_POSITION_ANGLE_LEFT_ARM))
+       move_data = {
+        "arm":{
+            "left_arm":{
+            "gripper":0.4,
+            },
+            },
+        }
+       self.move(move_data)
     def reset_position(self):
          self.controllers["arm"]["left_arm"].reset_position(np.array(START_POSITION_POS_LEFT_ARM))
     def set_up(self):

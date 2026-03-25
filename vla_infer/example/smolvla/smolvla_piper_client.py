@@ -101,7 +101,7 @@ class InferenceConfig:
 	timeout_ms: int = 2000
 	jpeg_quality: int = 80
 
-	
+	show_output_track: bool = False
 	max_steps: int = 1000
 	stop_on_timeout: bool = True
 	execute_chunk_steps: int = 8
@@ -137,6 +137,7 @@ class PiperVLAClient(InferenceClient):
 		client: t.Optional[VlaZmqClient] = None,
 	) -> None:
 		self.cfg = cfg
+		self.show_output_track = cfg.show_output_track
 		logging.basicConfig(
 			level=getattr(logging, cfg.log_level.upper(), logging.INFO),
 			format="%(asctime)s - %(levelname)s - %(message)s",
@@ -260,6 +261,7 @@ class PiperVLAClient(InferenceClient):
 
 		return {
 			"executed_steps": execute_steps,
+			"output_action": action_2d[:execute_steps],
 			"action_shape": tuple(action_2d.shape),
 		}
 	
@@ -272,8 +274,8 @@ class PiperVLAClient(InferenceClient):
 		return {
 			"action":  response,
 			"execution": execution_result,
+			"observation": observation,
 		}
-
 	def run(self, max_steps: t.Optional[int] = None) -> None:
 		"""Run the continuous control loop."""
 		step_limit = self.cfg.max_steps if max_steps is None else max_steps
@@ -293,6 +295,29 @@ class PiperVLAClient(InferenceClient):
 			try:
 				self.current_step_index = step
 				cycle_report = self.run_once()
+				
+				if self.show_output_track:
+					filepath = Path("/home/charles/workspaces/Double_Piper_Teleop/tem.json")
+					if filepath.exists() and step == 0: 
+						filepath.unlink()
+
+					data_log = {
+						"step": step,
+						"output_action": np.asarray(cycle_report["execution"]["output_action"]).tolist(),
+						"state": np.asarray(cycle_report["observation"]["state"]).tolist()
+					}
+
+					if filepath.exists():
+						with open(filepath, 'r', encoding='utf-8') as f:
+							data = json.load(f)
+						data["log"].append(data_log)
+					else:
+						data = {"log": [data_log]}
+				
+					# 写回文件（覆盖写入完整更新后的数据）
+					with open(filepath, 'w', encoding='utf-8') as f:
+						json.dump(data, f, indent=2)
+
 				logging.debug("loop_step=%s report=%s", step, cycle_report)
 			except TimeoutError:
 				logging.exception("Server timeout at step=%s", step)

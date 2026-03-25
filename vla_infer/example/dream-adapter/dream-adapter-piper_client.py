@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import logging
 import time
 import typing as t
-
+import json
 import draccus
 import numpy as np
 
@@ -59,6 +59,8 @@ class InferenceConfig:
 	interpolation_method: str = "linear"
 	interpolation_target_steps: int = 0
 
+	show_output_track: bool = False
+
 class PiperVLAClient(InferenceClient):
 	"""Client runtime that bridges PiperSingleRobot and VLA server.
 
@@ -78,6 +80,7 @@ class PiperVLAClient(InferenceClient):
 		client: t.Optional[VlaZmqClient] = None,
 	) -> None:
 		self.cfg = cfg
+		self.show_output_track = cfg.show_output_track
 		logging.basicConfig(
 			level=getattr(logging, cfg.log_level.upper(), logging.INFO),
 			format="%(asctime)s - %(levelname)s - %(message)s",
@@ -207,6 +210,10 @@ class PiperVLAClient(InferenceClient):
 
 		execute_steps = min(max(1, self.cfg.execute_chunk_steps), action_2d.shape[0])
 
+		##################
+		# action_2d = action_2d[execute_steps:]
+		##################
+
 		for idx in range(execute_steps):
 			#  self.robot.get_state()["state"] 
 			self.robot.apply_action({"action":action_2d[idx]})
@@ -215,6 +222,7 @@ class PiperVLAClient(InferenceClient):
 
 		return {
 			"executed_steps": execute_steps,
+			"output_action": action_2d[:execute_steps],
 			"action_shape": tuple(action_2d.shape),
 		}
 	
@@ -227,6 +235,7 @@ class PiperVLAClient(InferenceClient):
 		return {
 			"action":  response,
 			"execution": execution_result,
+			"observation": observation,
 		}
 
 	def run(self, max_steps: t.Optional[int] = None) -> None:
@@ -239,6 +248,28 @@ class PiperVLAClient(InferenceClient):
 		for step in range(step_limit):
 			try:
 				cycle_report = self.run_once()
+				if self.show_output_track:
+					filepath = Path("/home/charles/workspaces/Double_Piper_Teleop/tem.json")
+					if filepath.exists() and step == 0: 
+						filepath.unlink()
+
+					data_log = {
+						"step": step,
+						"output_action": np.asarray(cycle_report["execution"]["output_action"]).tolist(),
+						"state": np.asarray(cycle_report["observation"]["state"]).tolist()
+					}
+
+					if filepath.exists():
+						with open(filepath, 'r', encoding='utf-8') as f:
+							data = json.load(f)
+						data["log"].append(data_log)
+					else:
+						data = {"log": [data_log]}
+				
+					# 写回文件（覆盖写入完整更新后的数据）
+					with open(filepath, 'w', encoding='utf-8') as f:
+						json.dump(data, f, indent=2)
+
 				logging.debug("loop_step=%s report=%s", step, cycle_report)
 			except TimeoutError:
 				logging.exception("Server timeout at step=%s", step)

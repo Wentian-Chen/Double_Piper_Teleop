@@ -361,26 +361,26 @@ def main() -> None:
     主函数，用于执行可视化
     """
     # 配置参数
-    root_dir = "/home/lxx/repo/datasets/dream-adapter/miku112/pick_banana_200_newTable_2_offset_state_absolute_converted"
+    root_dir = "/home/charles/workspaces/Dream-adapter/datasets/pick_banana_100_newTable_1_offset_state_converted"
     
     # 选项1：处理所有找到的episode
-    # visualize_actions_from_h5(
-    #     root_dir=root_dir,
-    #     episodes=None,  # 处理所有episode
-    #     save_path="action_comparison_all_episodes.png",
-    #     alpha_base=0.3,
-    #     linewidth=0.8
-    # )
-    
-    # 选项2：只处理指定的episode（如果需要）
-    specific_episodes = ["000000", "000001", "000002", "000003"]
     visualize_actions_from_h5(
         root_dir=root_dir,
-        episodes=specific_episodes,
-        save_path="action_comparison_specific_episodes.png",
-        alpha_base=0.4,
+        episodes=None,  # 处理所有episode
+        save_path="action_comparison_all_episodes.png",
+        alpha_base=0.3,
         linewidth=0.8
     )
+    
+    # 选项2：只处理指定的episode（如果需要）
+    # specific_episodes = ["000000", "000001", "000002", "000003"]
+    # visualize_actions_from_h5(
+    #     root_dir=root_dir,
+    #     episodes=specific_episodes,
+    #     save_path="action_comparison_specific_episodes.png",
+    #     alpha_base=0.4,
+    #     linewidth=0.8
+    # )
     
     # 选项3：快速验证（可选）
     # quick_validate_actions(root_dir, max_episodes=50, max_steps_per_episode=250)
