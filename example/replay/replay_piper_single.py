@@ -3,7 +3,8 @@ import time
 import os
 import h5py
 import numpy as np
-
+import sys
+sys.path.append('/home/charles/workspaces/Double_Piper_Teleop')
 from my_robot.agilex_piper_single_base import PiperSingle
 
 # OpenCV 检测
@@ -218,7 +219,7 @@ def replay_file(hdf5_path, can_name="piper_slave", rate=30.0, compare=False, sav
                 for idx, arr in enumerate(images_arrays):
                     try:
                         frame = arr[i]
-                        img = normalize_image_frame(frame)
+                        img = cv2.cvtColor(normalize_image_frame(frame), cv2.COLOR_RGB2BGR) 
                         win = win_names[idx] if idx < len(win_names) else f"image_{idx}"
 
                         if gui_mode == "cv2":
@@ -284,10 +285,10 @@ def replay_file(hdf5_path, can_name="piper_slave", rate=30.0, compare=False, sav
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="从 hdf5 回放动作到 PiperSingle（含同步图像回放）")
-    parser.add_argument("hdf5", nargs="?", default=os.path.join(os.path.dirname(__file__), "../../datasets/test/0.hdf5"),
+    parser.add_argument("hdf5", nargs="?", default=os.path.join(os.path.dirname(__file__), "/home/charles/workspaces/Double_Piper_Teleop/datasets/pick_banana_200_noop/0041.hdf5"),
                         help="hdf5 文件路径（默认 datasets/test/0.hdf5）")
     parser.add_argument("--can", default="can0", help="CAN 名称，传给 PiperSingle.set_can_name")
-    parser.add_argument("--rate", type=float, default=2.0, help="回放频率 (Hz)")
+    parser.add_argument("--rate", type=float, default=10.0, help="回放频率 (Hz)")
     parser.add_argument("--compare", action="store_true", help="同时读取当前控制器返回的传感器数据并打印，便于对比")
     parser.add_argument("--save-images", action="store_true", help="保存每帧图像到磁盘（便于 headless 环境调试）")
     parser.add_argument("--save-dir", default="/tmp/replay_frames", help="保存图像的目录（配合 --save-images）")

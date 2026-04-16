@@ -17,7 +17,9 @@ from vla_infer.src.process.utils import (
     uint8_image_to_float32_01,
     smooth_action_chunk,
     delta_action_chunk_to_absolute,
-	check_uint8_rgb
+	check_uint8_rgb,
+	interpolate_action_chunk,
+
 )
 import sys
 from pathlib import Path
@@ -110,6 +112,11 @@ class InferenceConfig:
 
 	enable_inference_log: bool = False
 	log_dir: str = "vla_infer/example/vla-adapter/logs"
+
+	enable_action_interpolation: bool = False
+	use_smoothing: bool = False
+	interpolation_method: str = "linear"
+	interpolation_target_steps: int = 0
 
 	state_type: str = "qpos"
 	action_type: str = "joint"
@@ -243,6 +250,14 @@ class PiperVLAClient(InferenceClient):
 			)
 			logging.debug("Appended inference step log to: %s", self.inference_log_file_path)
 
+		if self.cfg.enable_action_interpolation:
+			if self.cfg.interpolation_target_steps <= 0:
+				raise ValueError("interpolation_target_steps must be > 0 when enable_action_interpolation=True")
+			smooth_action = interpolate_action_chunk(
+				smooth_action,
+				target_steps=self.cfg.interpolation_target_steps,
+				method=self.cfg.interpolation_method,
+			)
 		# ensure action is 2D (T, D)
 		if smooth_action.ndim == 1:
 			action_2d = smooth_action[None, :]

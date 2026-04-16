@@ -10,9 +10,15 @@ from sensor.Realsense_sensor import RealsenseSensor
 
 from data.collect_any import CollectAny
 
+# CAMERA_SERIALS = {
+#     'head': '023422071967',  # Replace with actual serial number
+#     'wrist': '152122077595',   # Replace with actual serial number
+# }
+# "327322061566"
+# '319522064878'
 CAMERA_SERIALS = {
-    'head': '023422071967',  # Replace with actual serial number
-    'wrist': '152122077595',   # Replace with actual serial number
+    'head': '319522064878',  # Replace with actual serial number
+    'wrist': '327322060229',   # Replace with actual serial number
 }
 START_POSITION_POS_LEFT_ARM = [
                 0.057, 
@@ -44,7 +50,7 @@ START_POSITION_ANGLE_RIGHT_ARM = [
 condition = {
     "robot":"piper_single",
     "save_path": "./datasets/", 
-    "task_name": "pick_banana_0318_2", 
+    "task_name": "pick_eggplant_0415_2", 
     "save_format": "hdf5", 
     "save_freq": 10, 
 }
@@ -72,14 +78,6 @@ class PiperSingle(Robot):
     # ============== init ==============
     def reset(self):
        self.controllers["arm"]["left_arm"].reset(np.array(START_POSITION_ANGLE_LEFT_ARM))
-       move_data = {
-        "arm":{
-            "left_arm":{
-            "gripper":0.4,
-            },
-            },
-        }
-       self.move(move_data)
     def reset_position(self):
          self.controllers["arm"]["left_arm"].reset_position(np.array(START_POSITION_POS_LEFT_ARM))
     def set_up(self):

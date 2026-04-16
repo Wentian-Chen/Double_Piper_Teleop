@@ -61,6 +61,9 @@ class InferenceConfig:
 
 	show_output_track: bool = False
 
+	enable_gripper_transform: bool = True
+	gripper_transform_threshold: float = 0.55
+	gripper_transform_delta: float = 0.3
 
 class PiperVLAClient(InferenceClient):
 	"""Client runtime that bridges PiperSingleRobot and VLA server.
@@ -128,6 +131,11 @@ class PiperVLAClient(InferenceClient):
 		# binary gripper state (open/close) for discrete action models, determined by thresholding the last element of state vector (gripper position)
 		if self.cfg.enable_binary_gripper:
 			obs["state"][-1] = 1.0 if obs["state"][-1] > self.cfg.binary_gripper_threshold else 0.0
+
+		# if self.cfg.enable_gripper_transform:	
+		# 	# transform gripper state based on threshold to potentially enhance model's ability to learn discrete open/close behavior, by creating a larger gap between open and close states in the input space
+		# 	obs["state"][-1] = obs["state"][-1] + self.cfg.gripper_transform_delta if obs["state"][-1] < self.cfg.gripper_transform_threshold else obs["state"][-1]
+
 		self.obs = obs # save for later use in execute
 		if self.cfg.action_type == "joint" and self.cfg.state_type == "qpos":
 			self.obs["joint_state"] = raw_obs.get("state", np.zeros(7, dtype=np.float32)) # save joint state for later use in absolute conversion
@@ -139,7 +147,7 @@ class PiperVLAClient(InferenceClient):
 		observation: t.Dict[str, t.Any],
 		task_instruction: t.Optional[str] = None,
 	) -> t.Any:
-		"""send observation and get server response."""
+		"""send observation an--------------------d get server response."""
 		# Log observation details for debugging.
 		for key, value in observation.items():
 			if value is not None and hasattr(value, "shape") and hasattr(value, "dtype"):
@@ -191,7 +199,10 @@ class PiperVLAClient(InferenceClient):
 			abs_action = np.concatenate([abs_action, action[:, -1:]], axis=-1) # concatenate the gripper command back before smoothing, so that the smoothing function can keep it unchanged
 			smooth_action = smooth_action_chunk(abs_action,max_angular_acceleration=0.01,max_angular_jerk=0.01)
 			print("abs action after smoothing:", smooth_action)
-
+		if self.cfg.enable_gripper_transform:
+			delta_gripper= smooth_action[:, -1] - self.cfg.gripper_transform_delta * (action[:, -1] < self.cfg.gripper_transform_threshold) # if the original action command is below the threshold, we assume it's a close command and we further decrease the gripper value in the smoothed action to enhance the close signal; if it's above the threshold, we keep it unchanged to preserve the open signal
+			smooth_action[:, -1]= delta_gripper
+			
 		if self.cfg.enable_action_interpolation:
 			if self.cfg.interpolation_target_steps <= 0:
 				raise ValueError("interpolation_target_steps must be > 0 when enable_action_interpolation=True")
