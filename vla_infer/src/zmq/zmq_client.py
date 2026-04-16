@@ -38,13 +38,13 @@ class VlaZmqClient(BaseZmqClient):
         :param jpeg_quality: 动态调整图像压缩率
         """
         # 1. 自动维护语言指令的缓存状态
-        if obs_dict.get("cmd","") == self._cached_cmd:
-            obs_dict["use_cached_cmd"] = True
-            obs_dict["cmd"] = "" 
-        else:
-            obs_dict["use_cached_cmd"] = False
-            self._cached_cmd = obs_dict.get("cmd","")
-            logging.info(f"[Task Switch] New instruction mapped: '{obs_dict.get('cmd','')}'")
+        # if obs_dict.get("cmd","") == self._cached_cmd:
+        #     obs_dict["use_cached_cmd"] = True
+        #     obs_dict["cmd"] = "" 
+        # else:
+        # obs_dict["use_cached_cmd"] = False
+        self._cached_cmd = obs_dict.get("cmd","")
+        # logging.info(f"[Task Switch] New instruction mapped: '{obs_dict.get('cmd','')}'")
 
         # 2. 调用动态协议层打包
         payload_bytes = VLAProtocol.pack_payload(obs_dict, jpeg_quality=self.jpeg_quality)
