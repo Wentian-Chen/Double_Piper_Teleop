@@ -170,12 +170,13 @@ if __name__ == "__main__":
     # ==================== 配置区 ====================
     # 请根据实际需求修改以下参数
     INPUT_FOLDERS = [
-        "/media/lxx/4A21-0000/Data/origin_data/pick_banana/dataset_1",
-        "/media/lxx/4A21-0000/Data/origin_data/pick_banana/dataset_2",
-        "/media/lxx/4A21-0000/Data/origin_data/pick_banana/dataset_3"
+        "/home/charles/workspaces/Double_Piper_Teleop/datasets/pick_banana_0311_1",
+        "/home/charles/workspaces/Double_Piper_Teleop/datasets/pick_banana_0313_1",
+        "/home/charles/workspaces/Double_Piper_Teleop/datasets/pick_banana_0318_1",
+
     ]
     THRESHOLD = 0.1          # 差异阈值（根据实际数据调整）
-    OUTPUT_DIR = "/media/lxx/4A21-0000/Data/origin_data/pick_banana_new"  # 所有输出文件的存放目录
+    OUTPUT_DIR = "/home/charles/workspaces/Double_Piper_Teleop/datasets/pick_banana_200_noop"  # 所有输出文件的存放目录
     # ===============================================
 
     main(INPUT_FOLDERS, THRESHOLD, OUTPUT_DIR)

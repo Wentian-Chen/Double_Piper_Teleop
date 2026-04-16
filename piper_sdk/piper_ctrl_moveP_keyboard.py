@@ -2,7 +2,25 @@
 # -*-coding:utf8-*-
 # 键盘控制Piper机械臂末端位置
 # 需要安装: pip install piper_sdk pynput
-
+"""
+=== 键盘控制说明 ===
+位置控制:
+  W/S - X轴 +/-
+  A/D - Y轴 +/-
+  Q/E - Z轴 上/下
+旋转控制:
+  I/K - RX +/-
+  J/L - RY +/-
+  U/O - RZ +/-
+夹爪控制:
+  空格 - 夹爪开/关切换
+  +/- - 微调夹爪位置
+其他:
+  ↑/↓ - 调整移动速度
+  R - 重置到初始位置
+  ESC - 退出程序
+==================
+"""
 import time
 import threading
 from pynput import keyboard
