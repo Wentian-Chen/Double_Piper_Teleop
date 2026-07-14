@@ -35,7 +35,7 @@ START_POSITION_ANGLE_LEFT_ARM = [
     -0.68542569,  # Joint 3
     0.,   # Joint 4
     0.78588684,  # Joint 5
-    -0.05256932,    # Joint 6
+    -0.05256932,    # Joint 
 ]
 # Define start position (in degrees)
 START_POSITION_ANGLE_RIGHT_ARM = [
@@ -50,7 +50,7 @@ START_POSITION_ANGLE_RIGHT_ARM = [
 condition = {
     "robot":"piper_single",
     "save_path": "./datasets/", 
-    "task_name": "pick_eggplant_0415_2", 
+    "task_name": "pick_up_battery_0527", 
     "save_format": "hdf5", 
     "save_freq": 10, 
 }
