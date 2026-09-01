@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-import dataclasses
 from datetime import datetime
 import csv
 import logging
@@ -16,12 +15,8 @@ import numpy as np
 from PIL import Image
 
 from vla_infer.src.inference.client import InferenceClient
-from vla_infer.src.diagnostics.piper_motion_recorder import PiperMotionDiagnosticsRecorder
 from vla_infer.src.robots.piper_single import PiperSingleRobot
 from vla_infer.src.zmq.zmq_client import VlaZmqClient
-from vla_infer.src.world_model_guard import AlignedActionQueue
-from vla_infer.src.world_model_guard import ClientWorldModelGuard
-from vla_infer.src.world_model_guard import ClientWorldModelGuardConfig
 from vla_infer.src.process.utils import (
     adaptive_resize_image,
 	ensure_hwc3_uint8_image,
@@ -149,8 +144,8 @@ class InferenceConfig:
 	stop_on_timeout: bool = True
 
 	action_key: str = "action"
-	# CODEX MODIFICATION: Use only the first N server actions before smoothing/interpolation; 0 keeps the full chunk.
-	server_action_prefix_steps: int = 0
+	# CODEX MODIFICATION: Request and retain the first N raw policy actions; 0 keeps the server's full chunk.
+	action_horizon: int = 0
 	execute_chunk_steps: int = 8
 	control_interval_s: float = 0.01
 	log_level: str = "INFO"
@@ -170,6 +165,8 @@ class InferenceConfig:
 	use_smoothing: bool = False
 	interpolation_method: str = "linear"
 	interpolation_target_steps: int = 333
+	# CODEX MODIFICATION: Generate this many control commands for each retained raw policy action.
+	interpolation_steps_per_action: int = 10
 
 	show_output_track: bool = False
 	# CODEX MODIFICATION: Save both camera streams observed by the policy client.
@@ -182,7 +179,7 @@ class InferenceConfig:
 	camera_record_every_n_steps: int = 5
 	# CODEX MODIFICATION: Record state/action values and save review plots locally.
 	record_state_action: bool = False
-	state_action_record_dir: str = "/home/charles/workspaces/wcy"
+	state_action_record_dir: str = "/home/charles/workspaces/Double_Piper_Teleop/state_action_records"
 	state_action_record_run_name: str = ""
 	state_action_plot: bool = True
 
@@ -195,25 +192,11 @@ class InferenceConfig:
 	rtc_execution_horizon: int = 10
 	rtc_max_guidance_weight: float = 10.0
 	rtc_prefix_attention_schedule: str = "LINEAR"
-	# 0 means auto: replan when enough buffered actions remain to cover the last observed inference latency.
+	# CODEX MODIFICATION: A positive fixed threshold overrides ratio and automatic RTC replanning.
 	rtc_replan_remaining_steps: int = 0
+	# CODEX MODIFICATION: A positive ratio overrides automatic RTC replanning; 0 selects automatic mode.
+	rtc_replan_remaining_ratio: float = 0.0
 	rtc_empty_queue_sleep_s: float = 0.001
-
-	# Client-owned World Model Guard. This mode uses the dedicated stateless
-	# OpenPI server and owns the aligned action queue in this process.
-	enable_client_world_model_guard: bool = False
-	client_world_model_checkpoint: str = (
-		"/home/charles/workspaces/wcy_workspace/openpi-Alex/artifacts/"
-		"world_model_guard/world_model_k5_best_cosine.pt"
-	)
-	client_world_model_device: str = "cuda"
-	client_world_model_execution_horizon: int = 30
-	client_world_model_k_step: t.Optional[int] = None
-	client_world_model_expected_visual_tokens: int = 512
-	client_world_model_lvm_mode: str = "official"
-	client_world_model_window_size: int = 15
-	client_world_model_bootstrap_size: int = 15
-	client_world_model_persistence: int = 5
 
 class PiperVLAClient(InferenceClient):
 	"""Client runtime that bridges PiperSingleRobot and VLA server.
@@ -234,6 +217,14 @@ class PiperVLAClient(InferenceClient):
 		client: t.Optional[VlaZmqClient] = None,
 	) -> None:
 		self.cfg = cfg
+		if self.cfg.action_horizon < 0:
+			raise ValueError("action_horizon must be >= 0")
+		if self.cfg.interpolation_steps_per_action <= 0:
+			raise ValueError("interpolation_steps_per_action must be > 0")
+		if self.cfg.rtc_replan_remaining_steps < 0:
+			raise ValueError("rtc_replan_remaining_steps must be >= 0")
+		if not 0.0 <= self.cfg.rtc_replan_remaining_ratio <= 1.0:
+			raise ValueError("rtc_replan_remaining_ratio must be between 0.0 and 1.0")
 		self.show_output_track = cfg.show_output_track
 		logging.basicConfig(
 			level=getattr(logging, cfg.log_level.upper(), logging.INFO),
@@ -316,35 +307,6 @@ class PiperVLAClient(InferenceClient):
 			)
 		)
 		self.obs: t.Dict[str, t.Any] = {}
-		self._client_world_model_guard: t.Optional[ClientWorldModelGuard] = None
-		self._client_world_model_queue: t.Optional[AlignedActionQueue] = None
-		self._client_world_model_session_id = datetime.now().strftime("piper-%Y%m%d-%H%M%S")
-		if self.cfg.enable_client_world_model_guard:
-			if self.cfg.enable_rtc:
-				raise ValueError(
-					"enable_rtc uses the legacy background queue and cannot be combined with "
-					"enable_client_world_model_guard; the client Guard already owns the queue"
-				)
-			guard_config = ClientWorldModelGuardConfig(
-				checkpoint=self.cfg.client_world_model_checkpoint,
-				device=self.cfg.client_world_model_device,
-				execution_horizon=self.cfg.client_world_model_execution_horizon,
-				k_step=self.cfg.client_world_model_k_step,
-				expected_visual_tokens=self.cfg.client_world_model_expected_visual_tokens,
-				lvm_mode=self.cfg.client_world_model_lvm_mode,
-				threshold_window_size=self.cfg.client_world_model_window_size,
-				threshold_bootstrap_size=self.cfg.client_world_model_bootstrap_size,
-				threshold_trigger_consecutive_steps=self.cfg.client_world_model_persistence,
-			)
-			self._client_world_model_guard = ClientWorldModelGuard(guard_config)
-			self._client_world_model_queue = AlignedActionQueue()
-			logging.info(
-				"Client World Model Guard enabled: checkpoint=%s k_step=%s horizon=%s device=%s",
-				self._client_world_model_guard.corrector.metadata.checkpoint_path,
-				self._client_world_model_guard.k_step,
-				guard_config.execution_horizon,
-				self._client_world_model_guard.corrector.device,
-			)
 		# CODEX MODIFICATION: RTC runtime state for action queue and background inference.
 		self._rtc_queue = RTCActionQueue()
 		self._rtc_inference_thread: t.Optional[threading.Thread] = None
@@ -353,38 +315,6 @@ class PiperVLAClient(InferenceClient):
 		self._rtc_inference_lock = threading.Lock()
 		self._rtc_last_inference_delay_model_steps = 0
 		self._rtc_inference_cycle = 0
-		# CODEX MODIFICATION: Stream chunk and 100 Hz feedback diagnostics without blocking the control loop on disk I/O.
-		self._motion_diagnostics: t.Optional[PiperMotionDiagnosticsRecorder] = None
-		self._diagnostic_chunk_id = -1
-		self._diagnostic_chunk_action_index = 0
-		self._diagnostic_control_step = 0
-		self._diagnostic_last_command_monotonic_ns: t.Optional[int] = None
-		if self.cfg.record_state_action and self._state_action_record_dir is not None:
-			self._motion_diagnostics = PiperMotionDiagnosticsRecorder(
-				self._state_action_record_dir,
-				metadata={
-					"run_name": self._state_action_record_dir.name,
-					"client_file": str(THIS_FILE),
-					"server_ip": self.cfg.server_ip,
-					"server_port": self.cfg.port,
-					"task_instruction": self.cfg.task_instruction,
-					"state_type": self.cfg.state_type,
-					"action_type": self.cfg.action_type,
-					"absolute_action": self.cfg.absolute_action,
-					"enable_rtc": self.cfg.enable_rtc,
-					"rtc_execution_horizon": self.cfg.rtc_execution_horizon,
-					"rtc_max_guidance_weight": self.cfg.rtc_max_guidance_weight,
-					"rtc_prefix_attention_schedule": self.cfg.rtc_prefix_attention_schedule,
-					"rtc_replan_remaining_steps": self.cfg.rtc_replan_remaining_steps,
-					"server_action_prefix_steps": self.cfg.server_action_prefix_steps,
-					"execute_chunk_steps": self.cfg.execute_chunk_steps,
-					"control_interval_s": self.cfg.control_interval_s,
-					"use_smoothing": self.cfg.use_smoothing,
-					"enable_action_interpolation": self.cfg.enable_action_interpolation,
-					"interpolation_method": self.cfg.interpolation_method,
-					"interpolation_target_steps": self.cfg.interpolation_target_steps,
-				},
-			)
 
 	@staticmethod
 	def _slugify_for_path(value: str, max_len: int = 64) -> str:
@@ -398,7 +328,7 @@ class PiperVLAClient(InferenceClient):
 		task_slug = self._slugify_for_path(self.cfg.task_instruction)
 		return f"{timestamp}_{task_slug}"
 
-	def _select_server_action_prefix(self, action: np.ndarray) -> np.ndarray:
+	def _apply_action_horizon(self, action: np.ndarray) -> np.ndarray:
 		# CODEX MODIFICATION: Trim the raw server chunk before any action post-processing.
 		action_2d = np.asarray(action, dtype=np.float32)
 		if action_2d.ndim == 1:
@@ -406,10 +336,10 @@ class PiperVLAClient(InferenceClient):
 		elif action_2d.ndim != 2:
 			raise ValueError(f"server action must be 1D or 2D, got shape={action_2d.shape}")
 
-		prefix_steps = int(self.cfg.server_action_prefix_steps)
-		if prefix_steps <= 0:
+		action_horizon = int(self.cfg.action_horizon)
+		if action_horizon <= 0:
 			return action_2d.copy()
-		return action_2d[: min(prefix_steps, action_2d.shape[0])].copy()
+		return action_2d[: min(action_horizon, action_2d.shape[0])].copy()
   
 	def get_observation(self) -> t.Dict[str, t.Any]:
 		"""Abstract step 1: collect and preprocess one observation payload."""
@@ -462,9 +392,13 @@ class PiperVLAClient(InferenceClient):
 			if value is not None and hasattr(value, "shape") and hasattr(value, "dtype"):
 				logging.debug(f"Observation '{key}' shape={value.shape} dtype={value.dtype}")
 
-    	# set cmd to task_instruction if provided, otherwise use default from config
+		# set cmd to task_instruction if provided, otherwise use default from config
 		observation["cmd"] = task_instruction or self.cfg.task_instruction
 		logging.debug(f"Observation 'cmd'='{observation['cmd']}'")
+		# CODEX MODIFICATION: Ask compatible servers to return only the requested raw action horizon.
+		requested_action_horizon = int(self.cfg.action_horizon)
+		if requested_action_horizon > 0:
+			observation["requested_action_horizon"] = requested_action_horizon
 
 		# CODEX MODIFICATION: RTC request fields tell the server about leftover actions and inference delay.
 		if self.cfg.enable_rtc:
@@ -480,65 +414,11 @@ class PiperVLAClient(InferenceClient):
 
 		# send observation to server and get response
 		# response = {"action": np.ndarray(T, D), ...}
-		# CODEX MODIFICATION: Preserve the full server response and precise request timing for motion diagnostics.
-		request_wall_time_ns = time.time_ns()
-		request_monotonic_ns = time.monotonic_ns()
 		server_response = self.zmq_client.get_response(obs_dict=observation)
-		response_monotonic_ns = time.monotonic_ns()
 		if "error" in server_response:
 			raise RuntimeError(f"VLA server error:\n{server_response['error']}")
-		server_action_full = np.asarray(server_response["action"], dtype=np.float32)
-		action = self._select_server_action_prefix(server_action_full)
-		return {
-			"action": action,
-			"server_action_full": server_action_full.copy(),
-			"request_wall_time_ns": request_wall_time_ns,
-			"request_monotonic_ns": request_monotonic_ns,
-			"response_monotonic_ns": response_monotonic_ns,
-			"inference_latency_ms": (response_monotonic_ns - request_monotonic_ns) / 1e6,
-		}
-
-	def _request_client_world_model_server(
-		self,
-		observation: t.Dict[str, t.Any],
-		*,
-		request_type: str,
-	) -> t.Dict[str, t.Any]:
-		"""Request a visual embedding or an ordinary aligned VLA plan."""
-		if request_type not in {"embed", "plan"}:
-			raise ValueError(f"Unsupported client World Model request type: {request_type!r}")
-		request = dict(observation)
-		request["cmd"] = self.cfg.task_instruction
-		request["client_world_model_guard_request"] = request_type
-		request["client_world_model_guard_session_id"] = self._client_world_model_session_id
-		request_start_ns = time.monotonic_ns()
-		response = self.zmq_client.get_response(obs_dict=request)
-		response_end_ns = time.monotonic_ns()
-		if "error" in response:
-			raise RuntimeError(f"Client World Model server error:\n{response['error']}")
-		if int(response.get("protocol_version", -1)) != 1:
-			raise RuntimeError(
-				f"Unsupported client World Model protocol version: {response.get('protocol_version')!r}"
-			)
-		if response.get("request_type") != request_type:
-			raise RuntimeError(
-				f"Client World Model response type mismatch: {response.get('request_type')!r}"
-			)
-		response["client_round_trip_ms"] = (response_end_ns - request_start_ns) / 1e6
-		return response
-
-	def _replace_client_world_model_queue(self, plan: t.Dict[str, t.Any]) -> int:
-		if self._client_world_model_queue is None:
-			raise RuntimeError("Client World Model action queue is not initialized")
-		if "action" not in plan or "model_actions" not in plan:
-			raise KeyError(
-				"Client World Model plan must contain aligned 'action' and 'model_actions' chunks"
-			)
-		return self._client_world_model_queue.replace(
-			np.asarray(plan["action"], dtype=np.float32),
-			np.asarray(plan["model_actions"], dtype=np.float32),
-			horizon=self.cfg.client_world_model_execution_horizon,
-		)
+		action = self._apply_action_horizon(server_response["action"])
+		return {"action": action}
 
 	def _postprocess_action_chunk(
 		self,
@@ -546,7 +426,7 @@ class PiperVLAClient(InferenceClient):
 		observation_context: t.Optional[t.Dict[str, t.Any]] = None,
 	) -> np.ndarray:
 		"""Convert raw server actions into robot-executable actions."""
-		action = self._select_server_action_prefix(action)
+		action = self._apply_action_horizon(action)
 		obs_context = observation_context or self.obs
 
 		if self.cfg.enable_binary_gripper:
@@ -598,14 +478,15 @@ class PiperVLAClient(InferenceClient):
 			smooth_action[:, -1]= delta_gripper
 			
 		if self.cfg.enable_action_interpolation:
-			if self.cfg.interpolation_target_steps <= 0:
-				raise ValueError("interpolation_target_steps must be > 0 when enable_action_interpolation=True")
+			# CODEX MODIFICATION: Scale interpolation with the retained horizon (for example, 4 * 10 = 40).
+			target_steps = smooth_action.shape[0] * self.cfg.interpolation_steps_per_action
 			smooth_action = interpolate_action_chunk(
 				smooth_action,
-				target_steps=self.cfg.interpolation_target_steps,
+				target_steps=target_steps,
 				method=self.cfg.interpolation_method,
 			)
- 		# ensure action is 2D (T, D)
+
+  		# ensure action is 2D (T, D)
 		if smooth_action.ndim == 1:
 			action_2d = smooth_action[None, :]
 		elif smooth_action.ndim == 2:
@@ -615,128 +496,9 @@ class PiperVLAClient(InferenceClient):
 
 		return action_2d
 
-	def _register_motion_diagnostic_chunk(
-		self,
-		response: t.Dict[str, t.Any],
-		processed_action: np.ndarray,
-		*,
-		source: str,
-		real_delay_model_steps: int = 0,
-		estimated_delay_model_steps: int = 0,
-		switch_control_step: t.Optional[int] = None,
-		queue_before: t.Optional[dict[str, int]] = None,
-		queue_after: t.Optional[dict[str, int]] = None,
-	) -> int:
-		# CODEX MODIFICATION: Assign a stable chunk ID and preserve every action representation at the swap boundary.
-		self._diagnostic_chunk_id += 1
-		self._diagnostic_chunk_action_index = 0
-		chunk_id = self._diagnostic_chunk_id
-		if self._motion_diagnostics is None:
-			return chunk_id
-
-		selected_action = np.asarray(response["action"], dtype=np.float32)
-		server_action = np.asarray(response.get("server_action_full", selected_action), dtype=np.float32)
-		processed_action = np.asarray(processed_action, dtype=np.float32)
-		delay_processed_steps = RTCActionQueue._original_to_processed_index(
-			min(max(0, int(real_delay_model_steps)), len(selected_action)),
-			len(selected_action),
-			len(processed_action),
-		)
-		queued_action = processed_action[delay_processed_steps:].copy()
-		self._motion_diagnostics.record_chunk({
-			"chunk_id": chunk_id,
-			"source": source,
-			"switch_control_step": self._diagnostic_control_step if switch_control_step is None else switch_control_step,
-			"request_wall_time_ns": response.get("request_wall_time_ns"),
-			"request_monotonic_ns": response.get("request_monotonic_ns"),
-			"response_monotonic_ns": response.get("response_monotonic_ns"),
-			"inference_latency_ms": response.get("inference_latency_ms"),
-			"real_delay_model_steps": int(real_delay_model_steps),
-			"estimated_delay_model_steps": int(estimated_delay_model_steps),
-			"delay_processed_steps": int(delay_processed_steps),
-			"queue_before": queue_before or {},
-			"queue_after": queue_after or {},
-			"server_action": server_action,
-			"selected_server_action": selected_action,
-			"smoothed_action": processed_action,
-			"queued_action": queued_action,
-			"server_action_shape": list(server_action.shape),
-			"selected_server_action_shape": list(selected_action.shape),
-			"smoothed_action_shape": list(processed_action.shape),
-			"queued_action_shape": list(queued_action.shape),
-		})
-		return chunk_id
-
-	def _apply_action_with_motion_diagnostics(
-		self,
-		action: np.ndarray,
-		*,
-		queue_remaining_before: int,
-		queue_remaining_after: int,
-	) -> int:
-		# CODEX MODIFICATION: Sample feedback immediately before each command and enqueue logging off the control thread.
-		feedback: dict[str, t.Any] = {}
-		feedback_error = ""
-		feedback_start_ns = time.monotonic_ns()
-		if self._motion_diagnostics is not None:
-			try:
-				feedback = self.robot.get_state()
-			except Exception as exc:
-				feedback_error = repr(exc)
-		feedback_read_ms = (time.monotonic_ns() - feedback_start_ns) / 1e6
-
-		apply_error = ""
-		apply_exception: t.Optional[Exception] = None
-		wall_time_ns = time.time_ns()
-		apply_start_ns = time.monotonic_ns()
-		actual_interval_s = (
-			float("nan")
-			if self._diagnostic_last_command_monotonic_ns is None
-			else (apply_start_ns - self._diagnostic_last_command_monotonic_ns) / 1e9
-		)
-		try:
-			self.robot.apply_action({"action": action})
-		except Exception as exc:
-			apply_error = repr(exc)
-			apply_exception = exc
-		apply_action_ms = (time.monotonic_ns() - apply_start_ns) / 1e6
-
-		if self._motion_diagnostics is not None:
-			self._motion_diagnostics.record_control_step(
-				control_step=self._diagnostic_control_step,
-				chunk_id=self._diagnostic_chunk_id,
-				chunk_action_index=self._diagnostic_chunk_action_index,
-				command_action=np.asarray(action, dtype=np.float32),
-				feedback=feedback,
-				wall_time_ns=wall_time_ns,
-				monotonic_ns=apply_start_ns,
-				actual_interval_s=actual_interval_s,
-				rtc_enabled=self.cfg.enable_rtc,
-				inference_running=self._rtc_inference_running(),
-				queue_remaining_before=queue_remaining_before,
-				queue_remaining_after=queue_remaining_after,
-				feedback_read_ms=feedback_read_ms,
-				apply_action_ms=apply_action_ms,
-				feedback_error=feedback_error,
-				command_applied=apply_exception is None,
-				apply_error=apply_error,
-			)
-		self._diagnostic_last_command_monotonic_ns = apply_start_ns
-		self._diagnostic_control_step += 1
-		self._diagnostic_chunk_action_index += 1
-		if apply_exception is not None:
-			raise apply_exception
-		return feedback_start_ns
-
 	def execute(self, response: t.Dict[str, t.Any]) -> t.Dict[str, t.Any]:
 		"""execute action chunk on robot."""
 		action_2d = self._postprocess_action_chunk(response["action"])
-		self._register_motion_diagnostic_chunk(
-			response,
-			action_2d,
-			source="synchronous",
-			switch_control_step=self._diagnostic_control_step,
-		)
 
 		execute_steps = min(max(1, self.cfg.execute_chunk_steps), action_2d.shape[0])
 
@@ -763,14 +525,12 @@ class PiperVLAClient(InferenceClient):
 						"stopped_by_user": True,
 					}
 
-			step_start_ns = self._apply_action_with_motion_diagnostics(
-				action_2d[idx],
-				queue_remaining_before=execute_steps - idx,
-				queue_remaining_after=execute_steps - idx - 1,
-			)
+			#  self.robot.get_state()["state"] 
+			step_start = time.monotonic()
+			self.robot.apply_action({"action":action_2d[idx]})
 			self._record_action_camera_frame(action_2d[idx])
 			if self.cfg.control_interval_s > 0:
-				elapsed = (time.monotonic_ns() - step_start_ns) / 1e9
+				elapsed = time.monotonic() - step_start
 				time.sleep(max(0.0, self.cfg.control_interval_s - elapsed))
 
 		return {
@@ -796,27 +556,11 @@ class PiperVLAClient(InferenceClient):
 		self,
 		result: dict[str, t.Any],
 		real_delay_model_steps: int,
-		*,
-		source: str = "rtc_background",
-		estimated_delay_model_steps: int = 0,
-		switch_control_step: t.Optional[int] = None,
 	) -> t.Dict[str, t.Any]:
 		# CODEX MODIFICATION: RTC merges a server chunk into the executable queue after local post-processing.
 		raw_action = np.asarray(result["response"]["action"], dtype=np.float32)
 		processed_action = self._postprocess_action_chunk(raw_action, result["observation"])
-		queue_before = self._rtc_queue.snapshot()
 		self._rtc_queue.merge(raw_action, processed_action, real_delay_model_steps)
-		queue_after = self._rtc_queue.snapshot()
-		self._register_motion_diagnostic_chunk(
-			result["response"],
-			processed_action,
-			source=source,
-			real_delay_model_steps=real_delay_model_steps,
-			estimated_delay_model_steps=estimated_delay_model_steps,
-			switch_control_step=switch_control_step,
-			queue_before=queue_before,
-			queue_after=queue_after,
-		)
 		self._rtc_last_inference_delay_model_steps = int(max(0, real_delay_model_steps))
 		return {
 			"action": result["response"],
@@ -839,11 +583,12 @@ class PiperVLAClient(InferenceClient):
 			return 0
 		if original_len > 0 and processed_len > 0:
 			model_step_s = self.cfg.control_interval_s * processed_len / original_len
-			return max(0, int(round(elapsed_s / model_step_s)))
-		return max(0, int(round(elapsed_s / self.cfg.control_interval_s)))
+			# CODEX MODIFICATION: Round up so a partial raw step cannot replay already-expired interpolated controls.
+			return max(0, int(np.ceil(elapsed_s / model_step_s)))
+		return max(0, int(np.ceil(elapsed_s / self.cfg.control_interval_s)))
 
 	def _auto_rtc_replan_remaining_steps(self) -> int:
-		# CODEX MODIFICATION: RTC auto trigger keeps enough buffered actions to cover policy latency.
+		# CODEX MODIFICATION: Keep enough processed actions for measured policy latency plus a 15% safety margin.
 		snapshot = self._rtc_queue.snapshot()
 		original_len = snapshot["original_len"]
 		processed_len = snapshot["processed_len"]
@@ -894,11 +639,12 @@ class PiperVLAClient(InferenceClient):
 				original_len = queue_snapshot["original_len"]
 				processed_len = queue_snapshot["processed_len"]
 				if original_len > 0 and processed_len > 0:
-					start_original = RTCActionQueue._processed_to_original_index(
-						queue_snapshot["last_processed_index"], original_len, processed_len
+					processed_delay = max(0, end_index - queue_snapshot["last_processed_index"])
+					# CODEX MODIFICATION: Conservatively map fractional interpolated progress to whole model steps.
+					real_delay_model_steps = max(
+						0,
+						int(np.ceil(processed_delay * original_len / processed_len)),
 					)
-					end_original = RTCActionQueue._processed_to_original_index(end_index, original_len, processed_len)
-					real_delay_model_steps = max(0, end_original - start_original)
 				elif self.cfg.control_interval_s > 0:
 					real_delay_model_steps = self._estimate_model_delay_from_elapsed(elapsed_s, original_len, processed_len)
 				else:
@@ -926,12 +672,31 @@ class PiperVLAClient(InferenceClient):
 		remaining = self._rtc_queue.qsize()
 		if remaining <= 0:
 			return True
+		snapshot = self._rtc_queue.snapshot()
+		processed_horizon = snapshot["processed_len"]
 		trigger_steps = int(self.cfg.rtc_replan_remaining_steps)
+		trigger_mode = "fixed"
 		if trigger_steps <= 0:
-			trigger_steps = self._auto_rtc_replan_remaining_steps()
-		return remaining <= trigger_steps
+			ratio = float(self.cfg.rtc_replan_remaining_ratio)
+			if ratio > 0.0:
+				trigger_mode = "ratio"
+				trigger_steps = max(1, int(np.floor(processed_horizon * ratio)))
+			else:
+				trigger_mode = "auto"
+				trigger_steps = self._auto_rtc_replan_remaining_steps()
+		should_start = remaining <= trigger_steps
+		if should_start:
+			logging.info(
+				"RTC replan trigger mode=%s remaining_actions=%s trigger_steps=%s processed_horizon=%s remaining_ratio=%.3f",
+				trigger_mode,
+				remaining,
+				trigger_steps,
+				snapshot["processed_len"],
+				remaining / snapshot["processed_len"] if snapshot["processed_len"] > 0 else 0.0,
+			)
+		return should_start
 
-	def _execute_rtc_action(self, action: np.ndarray, step: int, queue_remaining_after: int) -> bool:
+	def _execute_rtc_action(self, action: np.ndarray, step: int) -> bool:
 		# CODEX MODIFICATION: RTC executes one queued action at the fixed control interval.
 		if self.cfg.cautious_execute:
 			action_preview = np.round(action, 4).tolist()
@@ -944,27 +709,17 @@ class PiperVLAClient(InferenceClient):
 				self._stop_requested = True
 				return False
 
-		self._apply_action_with_motion_diagnostics(
-			action,
-			queue_remaining_before=queue_remaining_after + 1,
-			queue_remaining_after=queue_remaining_after,
-		)
+		self.robot.apply_action({"action": action})
 		return True
 
-	def _merge_pending_rtc_result(self, action_step: int) -> bool:
+	def _merge_pending_rtc_result(self) -> bool:
 		# CODEX MODIFICATION: RTC swaps in a finished background chunk without blocking execution.
 		result, error = self._take_rtc_inference_result()
 		if error is not None:
 			raise error
 		if result is None:
 			return False
-		cycle_report = self._process_rtc_response(
-			result,
-			result["real_delay_model_steps"],
-			source="rtc_background",
-			estimated_delay_model_steps=result["estimated_delay_model_steps"],
-			switch_control_step=action_step,
-		)
+		cycle_report = self._process_rtc_response(result, result["real_delay_model_steps"])
 		self._record_state_action_data(self._rtc_inference_cycle, cycle_report)
 		logging.info(
 			"RTC merged chunk cycle=%s real_delay_model_steps=%s estimated_delay_model_steps=%s elapsed_ms=%.1f remaining_actions=%s",
@@ -1001,9 +756,6 @@ class PiperVLAClient(InferenceClient):
 		initial_report = self._process_rtc_response(
 			{"observation": initial_observation, "response": initial_response},
 			real_delay_model_steps=0,
-			source="rtc_initial",
-			estimated_delay_model_steps=0,
-			switch_control_step=0,
 		)
 		queue_snapshot = self._rtc_queue.snapshot()
 		self._rtc_last_inference_delay_model_steps = self._estimate_model_delay_from_elapsed(
@@ -1016,7 +768,7 @@ class PiperVLAClient(InferenceClient):
 
 		action_step = 0
 		while action_step < step_limit and not self._stop_requested:
-			self._merge_pending_rtc_result(action_step)
+			self._merge_pending_rtc_result()
 			if self._should_start_rtc_inference():
 				self._start_rtc_inference()
 
@@ -1028,8 +780,7 @@ class PiperVLAClient(InferenceClient):
 				continue
 
 			step_start = time.monotonic()
-			queue_remaining_after = self._rtc_queue.qsize()
-			if not self._execute_rtc_action(action, action_step, queue_remaining_after):
+			if not self._execute_rtc_action(action, action_step):
 				break
 			self._record_action_camera_frame(action)
 			action_step += 1
@@ -1505,136 +1256,8 @@ class PiperVLAClient(InferenceClient):
 		fig.savefig(self._state_action_record_dir / "gripper_curves.png", dpi=150)
 		plt.close(fig)
 
-	def run_client_world_model_guard(self, max_steps: t.Optional[int] = None) -> None:
-		"""Run client-owned Guard with one fresh observation per macro action."""
-		guard = self._client_world_model_guard
-		queue = self._client_world_model_queue
-		if guard is None or queue is None:
-			raise RuntimeError("Client World Model Guard was not initialized")
-		step_limit = self.cfg.max_steps if max_steps is None else max_steps
-		if step_limit <= 0:
-			raise ValueError("max_steps must be > 0")
-		if self._stop_requested:
-			logging.info("Client World Model Guard loop stopped before episode start")
-			return
-
-		guard.reset()
-		queue.clear()
-		replan_count = 0
-		trigger_count = 0
-		logging.info(
-			"Starting client World Model Guard: steps=%s k=%s horizon=%s interpolation=%s",
-			step_limit,
-			guard.k_step,
-			self.cfg.client_world_model_execution_horizon,
-			self.cfg.enable_action_interpolation,
-		)
-		if self.cfg.enable_action_interpolation:
-			logging.warning(
-				"Client Guard treats all commands produced from one queued VLA action as one macro step. "
-				"Ensure execute_chunk_steps/control_interval_s match the World Model training cadence; "
-				"the current single-action interpolator repeats the target command."
-			)
-
-		for macro_step in range(step_limit):
-			observation = self.get_observation()
-			request_type = "plan" if len(queue) == 0 else "embed"
-			server_result = self._request_client_world_model_server(
-				observation,
-				request_type=request_type,
-			)
-			decision = guard.begin_step(server_result)
-			queue_was_truncated = False
-			removed_actions = 0
-			replanned = request_type == "plan"
-
-			if decision.triggered:
-				removed_actions = queue.clear()
-				queue_was_truncated = removed_actions > 0
-				trigger_count += 1
-				if request_type != "plan":
-					server_result = self._request_client_world_model_server(
-						observation,
-						request_type="plan",
-					)
-					replanned = True
-
-			if replanned:
-				queued_actions = self._replace_client_world_model_queue(server_result)
-				replan_count += 1
-			else:
-				queued_actions = len(queue)
-
-			action_pair = queue.pop()
-			monitor_payload = (
-				None if decision.monitor is None else dataclasses.asdict(decision.monitor)
-			)
-			managed_response = {
-				"action": action_pair.environment_action[None, :],
-				"server_action_full": np.asarray(
-					server_result.get("action", action_pair.environment_action[None, :]),
-					dtype=np.float32,
-				),
-				"model_action": action_pair.model_action.copy(),
-				"action_id": action_pair.action_id,
-				"client_world_model_guard": {
-					"step": decision.step,
-					"k_step": decision.k_step,
-					"triggered": decision.triggered,
-					"trigger_count": trigger_count,
-					"replanned": replanned,
-					"replan_count": replan_count,
-					"queue_was_truncated": queue_was_truncated,
-					"removed_actions": removed_actions,
-					"queued_actions_from_plan": queued_actions,
-					"queue_remaining": len(queue),
-					"monitor": monitor_payload,
-					"ogg_applied": False,
-				},
-				"client_round_trip_ms": server_result.get("client_round_trip_ms"),
-				"server_timing": server_result.get("server_timing", {}),
-				"policy_timing": server_result.get("policy_timing", {}),
-			}
-
-			try:
-				execution_result = self.execute(managed_response)
-			except Exception:
-				guard.cancel_open_step()
-				raise
-
-			if execution_result.get("executed_steps", 0) < 1:
-				guard.cancel_open_step()
-				logging.warning(
-					"Client Guard action %s was not executed; stopping without committing prediction",
-					action_pair.action_id,
-				)
-				break
-
-			guard.commit_executed_action(action_pair.model_action)
-			cycle_report = {
-				"action": managed_response,
-				"execution": execution_result,
-				"observation": observation,
-			}
-			self._record_state_action_data(macro_step, cycle_report)
-			logging.info(
-				"Client Guard step=%s action_id=%s trigger=%s reason=%s replan=%s queue=%s rtt_ms=%.1f",
-				decision.step,
-				action_pair.action_id,
-				decision.triggered,
-				"" if decision.monitor is None else decision.monitor.trigger_reason,
-				replanned,
-				len(queue),
-				float(server_result.get("client_round_trip_ms", 0.0)),
-			)
-			if execution_result.get("stopped_by_user", False) or self._stop_requested:
-				break
-
 	def run(self, max_steps: t.Optional[int] = None) -> None:
 		"""Run the continuous control loop."""
-		if self.cfg.enable_client_world_model_guard:
-			self.run_client_world_model_guard(max_steps=max_steps)
-			return
 		if self.cfg.enable_rtc:
 			self.run_rtc(max_steps=max_steps)
 			return
@@ -1694,10 +1317,6 @@ class PiperVLAClient(InferenceClient):
 		if self._camera_record_log is not None:
 			self._camera_record_log.close()
 			self._camera_record_log = None
-		# CODEX MODIFICATION: Drain diagnostic records before reporting the run as finalized.
-		if self._motion_diagnostics is not None:
-			self._motion_diagnostics.close()
-			self._motion_diagnostics = None
 		self._finalize_state_action_recording()
 		self.zmq_client.close()
 

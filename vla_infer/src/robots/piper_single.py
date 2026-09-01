@@ -220,10 +220,20 @@ class PiperSingleRobot(BaseRobot):
             "gripper": np.ndarray(1,),  # 夹爪开合度
         }
         """
-        joint = self._arm_controller.get_state().get("joint", {})
-        gripper = self._arm_controller.get_state().get("gripper", {})
+        # CODEX MODIFICATION: Read one coherent controller snapshot and expose end-pose diagnostics.
+        controller_state = self._arm_controller.get_state()
+        joint = controller_state.get("joint", {})
+        gripper = controller_state.get("gripper", {})
         state = np.concatenate([self._to_fixed_length_vector(joint, 6), self._to_fixed_length_vector(gripper, 1)], axis=0)
-        return {"state": state}
+        return {
+            "state": state,
+            "joint": self._to_fixed_length_vector(joint, 6),
+            "gripper": self._to_fixed_length_vector(gripper, 1),
+            "end_pose_xyz_m": np.asarray(controller_state.get("end_pose_xyz_m", np.full(3, np.nan))),
+            "end_pose_rpy_rad": np.asarray(controller_state.get("end_pose_rpy_rad", np.full(3, np.nan))),
+            "end_pose_raw": np.asarray(controller_state.get("end_pose_raw", np.full(6, np.nan))),
+            "feedback_hz": np.asarray(controller_state.get("feedback_hz", np.full(3, np.nan))),
+        }
     def apply_action(self, action_dict: t.Dict[str, np.ndarray]) -> None:
         """将动作字典转换为 PiperSingle 控制指令并执行。"""
         joint, gripper = self._parse_action(action_dict)

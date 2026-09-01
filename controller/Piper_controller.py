@@ -59,14 +59,34 @@ class PiperController(ArmController):
     # 返回单位为米
     def get_state(self):
         state = {}
-        eef = self.controller.GetArmEndPoseMsgs()
-        joint = self.controller.GetArmJointMsgs()
+        eef_msg = self.controller.GetArmEndPoseMsgs()
+        joint_msg = self.controller.GetArmJointMsgs()
+        gripper_msg = self.controller.GetArmGripperMsgs()
+        eef = eef_msg.end_pose
+        joint = joint_msg
         
         state["joint"] = np.array([joint.joint_state.joint_1, joint.joint_state.joint_2, joint.joint_state.joint_3,\
                                    joint.joint_state.joint_4, joint.joint_state.joint_5, joint.joint_state.joint_6]) * 0.001 / 180 * 3.1415926
-        state["qpos"] = np.array([eef.end_pose.X_axis, eef.end_pose.Y_axis, eef.end_pose.Z_axis, \
-                                  eef.end_pose.RX_axis, eef.end_pose.RY_axis, eef.end_pose.RZ_axis]) * 0.001 / 1000
-        state["gripper"] = self.controller.GetArmGripperMsgs().gripper_state.grippers_angle * 0.001 / 70
+        state["qpos"] = np.array([eef.X_axis, eef.Y_axis, eef.Z_axis, \
+                                  eef.RX_axis, eef.RY_axis, eef.RZ_axis]) * 0.001 / 1000
+        state["gripper"] = gripper_msg.gripper_state.grippers_angle * 0.001 / 70
+        # CODEX MODIFICATION: Preserve SDK units and expose correctly converted end pose for motion diagnostics.
+        end_pose_raw = np.array([
+            eef.X_axis,
+            eef.Y_axis,
+            eef.Z_axis,
+            eef.RX_axis,
+            eef.RY_axis,
+            eef.RZ_axis,
+        ], dtype=np.int64)
+        state["end_pose_raw"] = end_pose_raw
+        state["end_pose_xyz_m"] = end_pose_raw[:3].astype(np.float64) * 1e-6
+        state["end_pose_rpy_rad"] = np.deg2rad(end_pose_raw[3:].astype(np.float64) * 1e-3)
+        state["feedback_hz"] = np.array([
+            getattr(joint_msg, "Hz", np.nan),
+            getattr(eef_msg, "Hz", np.nan),
+            getattr(gripper_msg, "Hz", np.nan),
+        ], dtype=np.float64)
         return state
 
     # All returned values are expressed in meters,if the value represents an angle, it is returned in radians

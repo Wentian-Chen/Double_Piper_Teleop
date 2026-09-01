@@ -25,10 +25,11 @@ python vla_infer/example/dream-adapter/dream-adapter-piper_client.py \
   --rtc_execution_horizon 10 \
   --rtc_max_guidance_weight 10.0 \
   --rtc_prefix_attention_schedule LINEAR \
+  --server_action_prefix_steps 10 \
   --execute_chunk_steps 200 \
   --control_interval_s 0.01 \
   --enable_action_interpolation true \
-  --interpolation_target_steps 333 \
+  --interpolation_target_steps 100 \
   --record_cameras false
 ```
 

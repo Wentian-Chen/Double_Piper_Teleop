@@ -50,7 +50,7 @@ START_POSITION_ANGLE_RIGHT_ARM = [
 condition = {
     "robot":"piper_single",
     "save_path": "./datasets/", 
-    "task_name": "pick_up_battery_0527", 
+    "task_name": "pick_eggplant_drawer_0730-1", 
     "save_format": "hdf5", 
     "save_freq": 10, 
 }

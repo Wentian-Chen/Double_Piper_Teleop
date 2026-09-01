@@ -42,3 +42,8 @@ policy/ACT/act_ckpt
 policy/ACT/detr/detr.egg-info
 controller/URUrx_controller.py
 rdt_dataset/
+camera_records/
+state_action_records/
+tmp/
+world_model_shadow_logs/
+test_datasets/
