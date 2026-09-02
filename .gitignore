@@ -20,6 +20,8 @@ save/
 datasets_rlds/
 .vscode/
 datasets_lerobot/
+# eval outputs
+policy/smolvla/eval_results/
 # example/teleop
 test/*
 tests/*
