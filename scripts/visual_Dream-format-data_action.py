@@ -361,7 +361,7 @@ def main() -> None:
     主函数，用于执行可视化
     """
     # 配置参数
-    root_dir = "/home/charles/workspaces/Dream-adapter/datasets/pick_banana_100_newTable_1_offset_state_converted"
+    root_dir = "/home/lxx/repo/datasets/dream-adapter/miku112/pick_banana_200_newTable_noop_1_offset_state_converted"
     
     # 选项1：处理所有找到的episode
     visualize_actions_from_h5(

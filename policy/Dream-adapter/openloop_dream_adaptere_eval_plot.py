@@ -48,21 +48,22 @@ tf.config.set_visible_devices([], "GPU")
 class JointEvalConfig:
     # Model parameters 需要根据实际情况修改路径和参数
     pretrained_checkpoint: Union[str, Path] = (
-        "/home/charles/workspaces/Dream-adapter/outputs/configs+pick_banana_100_newTable_1_offset_state_converted+b16+lr-0.0002+lora-r32+dropout-0.0--image_aug--train-1_offset_absolute-0325-02--10000_chkpt"
+        "/home/lxx/repo/VLA-Adapter/outputs/pick_banana_200_newTable_1_offset_absolute_converted_20260326_225422/configs+pick_banana_200_newTable_1_offset_absolute_converted+b16+lr-0.0002+lora-r32+dropout-0.0--image_aug--train-noop_1_offset_absolute-0326--20000_chkpt"
     )
     base_model_checkpoint: Optional[Union[str, Path]] = None
     model_family: str = "openvla"
 
     # Dataset parameters (Dream-Adapter converted format) 需要根据实际情况修改路径和参数
     dataset_path: Union[str, Path] = (
-        "/home/charles/workspaces/Dream-adapter/datasets/pick_banana_100_newTable_1_offset_state_converted"
+        "/home/lxx/repo/datasets/dream-adapter/miku112/pick_banana_200_newTable_1_offset_absolute_converted"
     )
     max_episodes: Optional[int] = None
     action_key: str = "action"
-    proprio_dim: int = 7
+    proprio_dim: int = 8
 
     # Runtime/model switches (aligned with existing eval script)
     use_l1_regression: bool = True
+    use_action_fues_image: bool = False
     use_minivlm: bool = True
     use_pro_version: bool = True
     load_in_8bit: bool = False
@@ -74,11 +75,11 @@ class JointEvalConfig:
     use_reconstruct_images: bool = True
     center_crop: bool = True
     num_open_loop_steps: int = 8
-    unnorm_key: str = "pick_banana_200_newTable_2_offset_state_absolute_converted" # 需要根据实际情况修改路径和参数
+    unnorm_key: str = "pick_banana_200_newTable_1_offset_state_absolute_converted" # 需要根据实际情况修改路径和参数
     save_version: str = "vla-adapter"
 
     # Output
-    ep_index: int = 15 # 测试的 episode index
+    ep_index: int = 0 # 测试的 episode index
 
 def initialize_model(cfg: JointEvalConfig):
     """Initialize model and optional heads/projectors."""
@@ -221,12 +222,30 @@ def plot_joint_trajectories(gt_states, gt_actions, pred_actions):
     """
     # 验证输入长度一致性
     n_steps = len(gt_states)
+    if n_steps == 0:
+        raise ValueError("No valid samples collected, skip plotting.")
     if not (len(gt_actions) == n_steps and len(pred_actions) == n_steps):
         raise ValueError("gt_states, gt_actions, pred_actions 的长度必须一致")
-    
-    # 获取关节数量（假设至少有一个 step 且维度为 7）
-    n_joints = gt_states[0].shape[0]
-    n_actions = gt_actions[0].shape[0]  # 应为 8
+
+    first_state = np.asarray(gt_states[0])
+    first_action = np.asarray(gt_actions[0])
+    first_pred_action = np.asarray(pred_actions[0])
+
+    if first_action.ndim != 2 or first_pred_action.ndim != 2:
+        raise ValueError(
+            f"Expected 2D open-loop action tensors, got gt_action={first_action.shape}, pred_action={first_pred_action.shape}"
+        )
+
+    # 只画动作和状态都覆盖到的维度；LIBERO proprio 常比动作多 1 维。
+    n_actions = first_action.shape[0]
+    n_joints = min(first_state.shape[0], first_action.shape[1], first_pred_action.shape[1])
+    if first_state.shape[0] != n_joints:
+        logger.warning(
+            "State dim %s differs from action dim %s, plotting first %s dimensions only.",
+            first_state.shape[0],
+            first_action.shape[1],
+            n_joints,
+        )
     
     # 创建子图
     fig, axes = plt.subplots(n_joints, 1, figsize=(10, 2 * n_joints), sharex=True)
@@ -239,8 +258,8 @@ def plot_joint_trajectories(gt_states, gt_actions, pred_actions):
         
         # 绘制 gt_states（蓝点）
         step_indices = np.arange(n_steps)
-        state_vals = [state[joint_idx] for state in gt_states]
-        ax.plot(step_indices, state_vals, 'bo', markersize=4)
+        state_vals = [np.asarray(state)[joint_idx] for state in gt_states]
+        ax.plot(step_indices, state_vals, 'bo', markersize=4, label='gt_state' if joint_idx == 0 else None)
         
         # 绘制每个 step 的动作序列
         for step in range(n_steps):
@@ -248,16 +267,31 @@ def plot_joint_trajectories(gt_states, gt_actions, pred_actions):
             x_actions = step + np.linspace(0, 1, n_actions, endpoint=True)
             
             # 预测动作（红线）先画，以便后续绿线覆盖
-            pred_vals = pred_actions[step][:, joint_idx]
-            ax.plot(x_actions, pred_vals, 'r-', linewidth=1.5, alpha=0.7)
+            pred_vals = np.asarray(pred_actions[step])[:, joint_idx]
+            ax.plot(
+                x_actions,
+                pred_vals,
+                'r-',
+                linewidth=1.5,
+                alpha=0.7,
+                label='pred_action' if step == 0 and joint_idx == 0 else None,
+            )
             
             # 真实动作（绿线）后画，覆盖红线
-            gt_vals = gt_actions[step][:, joint_idx]
-            ax.plot(x_actions, gt_vals, 'g-', linewidth=1.5, alpha=0.9)
+            gt_vals = np.asarray(gt_actions[step])[:, joint_idx]
+            ax.plot(
+                x_actions,
+                gt_vals,
+                'g-',
+                linewidth=1.5,
+                alpha=0.9,
+                label='gt_action' if step == 0 and joint_idx == 0 else None,
+            )
         
         ax.set_ylabel(f'Joint {joint_idx}')
         ax.grid(True, linestyle='--', alpha=0.6)
-        ax.legend(loc='upper right')
+        if joint_idx == 0:
+            ax.legend(loc='upper right')
     
     axes[-1].set_xlabel('Step')
     plt.suptitle('Joint State and Action Sequences (Green: gt_action, Red: pred_action)', fontsize=14)
@@ -307,8 +341,12 @@ def eval_openloop_joint(cfg: JointEvalConfig) -> None:
             print(new_data_h5)
             # 判读文件是否存在,如果不存在用最后一个值填补
             if not new_data_h5.exists():
-                gt_action.append(gt_action[-1])
-                continue
+                if gt_action:
+                    gt_action.append(gt_action[-1])
+                    continue
+                logger.warning("Missing first action file at %s, skip this rollout window.", new_data_h5)
+                gt_action = []
+                break
 
             with h5py.File(new_data_h5, "r") as fp:
                 if cfg.action_key not in fp:
@@ -348,11 +386,16 @@ def eval_openloop_joint(cfg: JointEvalConfig) -> None:
             logger.error("Prediction failed at %s: %s", step_dir, exc)
             break
 
+        if not gt_action:
+            continue
+
         gt_actions.append(np.stack(gt_action))
         pred_actions.append(pred_action)
         gt_states.append(proprio)
     
     # 画图
+    if not gt_actions:
+        raise RuntimeError("No successful rollout windows were collected; nothing to plot.")
     plot_joint_trajectories(gt_states, gt_actions, pred_actions)
 
 
