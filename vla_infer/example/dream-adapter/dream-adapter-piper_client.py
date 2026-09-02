@@ -61,6 +61,7 @@ class InferenceConfig:
 
 	show_output_track: bool = False
 
+
 class PiperVLAClient(InferenceClient):
 	"""Client runtime that bridges PiperSingleRobot and VLA server.
 
@@ -127,7 +128,6 @@ class PiperVLAClient(InferenceClient):
 		# binary gripper state (open/close) for discrete action models, determined by thresholding the last element of state vector (gripper position)
 		if self.cfg.enable_binary_gripper:
 			obs["state"][-1] = 1.0 if obs["state"][-1] > self.cfg.binary_gripper_threshold else 0.0
-   
 		self.obs = obs # save for later use in execute
 		if self.cfg.action_type == "joint" and self.cfg.state_type == "qpos":
 			self.obs["joint_state"] = raw_obs.get("state", np.zeros(7, dtype=np.float32)) # save joint state for later use in absolute conversion
@@ -200,7 +200,7 @@ class PiperVLAClient(InferenceClient):
 				target_steps=self.cfg.interpolation_target_steps,
 				method=self.cfg.interpolation_method,
 			)
-  		# ensure action is 2D (T, D)
+ 		# ensure action is 2D (T, D)
 		if smooth_action.ndim == 1:
 			action_2d = smooth_action[None, :]
 		elif smooth_action.ndim == 2:

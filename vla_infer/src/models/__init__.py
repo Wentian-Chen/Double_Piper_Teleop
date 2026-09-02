@@ -11,7 +11,7 @@ if t.TYPE_CHECKING:
     from .dream_adapter_model import DreamAdapterModel
     from .smolvla_model import SmolVLAModel
     from .vla_adapter_model import VlaAdapterModel
-
+    from .dream_adapter_replace_model import DreamAdapterReplaceModel
     VLAAdapterModel = VlaAdapterModel
 
 __all__ = [
@@ -20,6 +20,7 @@ __all__ = [
     "VlaAdapterModel",
     "VLAAdapterModel",
     "DreamAdapterModel",
+    "DreamAdapterReplaceModel"
 ]
 
 _SYMBOL_TO_MODULE = {
@@ -28,6 +29,7 @@ _SYMBOL_TO_MODULE = {
     "VlaAdapterModel": ".vla_adapter_model",
     "VLAAdapterModel": ".vla_adapter_model",
     "DreamAdapterModel": ".dream_adapter_model",
+    "DreamAdapterReplaceModel": ".dream_adapter_replace_model",
 }
 
 
