@@ -62,7 +62,7 @@ class JointEvalConfig:
     )
     max_episodes: Optional[int] = None
     action_key: str = "action"
-    proprio_dim: int = 7
+    proprio_dim: int = 8
 
     # Runtime/model switches (aligned with existing eval script)
     use_l1_regression: bool = True
@@ -81,7 +81,7 @@ class JointEvalConfig:
 
     # Output
     plots_dir: Union[str, Path] = "openloop_eval_plots_joint"
-    plot_first_n_episodes: int = 5
+    plot_first_n_episodes: int = 1
 
 
 def initialize_model(cfg: JointEvalConfig):
@@ -254,6 +254,7 @@ def eval_openloop_joint(cfg: JointEvalConfig) -> None:
         ep_steps = 0
         gt_actions = []
         pred_actions = []
+        ep_step_pairs = {}  # {step_0000: {pred_value: [...], GT_value: [...]}, ...}
 
         for step_dir in step_dirs:
             data_h5 = step_dir / "data.h5"
@@ -300,6 +301,13 @@ def eval_openloop_joint(cfg: JointEvalConfig) -> None:
             gt_actions.append(gt_action)
             pred_actions.append(pred_action)
 
+            # Store step-level pred/GT pair
+            step_name = f"step_{step_dir.name}"
+            ep_step_pairs[step_name] = {
+                "pred_value": pred_action.tolist(),
+                "GT_value": gt_action.tolist(),
+            }
+
             mse = float(np.mean((pred_action - gt_action) ** 2))
             ep_mse_sum += mse
             ep_steps += 1
@@ -308,6 +316,12 @@ def eval_openloop_joint(cfg: JointEvalConfig) -> None:
             continue
 
         ep_avg_mse = ep_mse_sum / ep_steps
+        # Save step-level predictions as JSON
+        json_file = plots_dir / f"episode_{ep_dir.name}_step_pairs.json"
+        with open(json_file, "w", encoding="utf-8") as fp:
+            json.dump(ep_step_pairs, fp, indent=2)
+        logger.info("Saved step pairs to %s", json_file)
+
         total_mse += ep_avg_mse
         total_episodes += 1
         all_episode_mses.append(ep_avg_mse)

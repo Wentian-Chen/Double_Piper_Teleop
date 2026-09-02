@@ -207,7 +207,7 @@ def eval_openloop(cfg: EvalConfig) -> None:
         logger.info(f"Failed to load builder from {dataset_path}, trying to find inner folder...")
         found = False
         for root, dirs, files in os.walk(dataset_path):
-            if "dataset_info.json" in files:
+            if "dataset_statistics.json" in files:
                 dataset_path = root
                 found = True
                 break
